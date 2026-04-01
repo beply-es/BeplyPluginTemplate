@@ -1,0 +1,119 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - 'v*'
+  pull_request:
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  FACTURASCRIPTS_REF: v2025.71
+
+concurrency:
+  group: beplyplugintemplate-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    timeout-minutes: 20
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+
+    steps:
+      - name: Checkout FacturaScripts
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: NeoRazorX/facturascripts
+          ref: ${{ env.FACTURASCRIPTS_REF }}
+          path: facturascripts
+
+      - name: Checkout Plugin
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          path: facturascripts/Plugins/BeplyPluginTemplate
+          fetch-depth: 0
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@accd6127cb78bee3e8082180cb391013d204ef9f # 2.37.0
+        with:
+          php-version: '8.2'
+          extensions: bcmath, gd, mbstring, intl, zip, curl, pgsql, pdo_pgsql
+          coverage: none
+
+      - name: Install Composer dependencies
+        working-directory: facturascripts
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Install plugin Composer dependencies
+        working-directory: facturascripts
+        run: |
+          if [ -f Plugins/BeplyPluginTemplate/composer.json ]; then
+            if grep -q '"facturascripts/core"' Plugins/BeplyPluginTemplate/composer.json; then
+              echo "Skipping plugin composer install because facturascripts/core is provided by the host application."
+            else
+              composer install --working-dir=Plugins/BeplyPluginTemplate --no-interaction --prefer-dist
+            fi
+          fi
+
+      - name: Prepare PHPUnit bootstrap
+        working-directory: facturascripts
+        run: |
+          cat > Test/beplyplugintemplate-ci-bootstrap.php << 'EOF'
+          <?php
+          define("FS_FOLDER", getcwd());
+          require_once FS_FOLDER . "/vendor/autoload.php";
+          $pluginVendor = FS_FOLDER . "/Plugins/BeplyPluginTemplate/vendor/autoload.php";
+          if (file_exists($pluginVendor)) {
+              require_once $pluginVendor;
+          }
+          $config = FS_FOLDER . "/config.php";
+          if (file_exists($config)) {
+              require_once $config;
+          }
+          EOF
+
+      - name: Discover unit targets
+        id: unit-targets
+        working-directory: facturascripts
+        run: |
+          set -euo pipefail
+          targets=()
+          if [ -d Plugins/BeplyPluginTemplate/Test ]; then
+            while IFS= read -r -d '' file; do
+              targets+=("$file")
+            done < <(find Plugins/BeplyPluginTemplate/Test -type f -name '*Test.php' -print0)
+          fi
+          if [ -d Plugins/BeplyPluginTemplate/Tests ]; then
+            while IFS= read -r -d '' file; do
+              targets+=("$file")
+            done < <(find Plugins/BeplyPluginTemplate/Tests -type f -name '*Test.php' -print0)
+          fi
+
+          if [ "${#targets[@]}" -eq 0 ]; then
+            echo "has_tests=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "has_tests=true" >> "$GITHUB_OUTPUT"
+          echo "targets=${targets[*]}" >> "$GITHUB_OUTPUT"
+
+      - name: Run PHPUnit unit suite
+        if: steps.unit-targets.outputs.has_tests == 'true'
+        working-directory: facturascripts
+        run: |
+          php -d memory_limit=512M vendor/bin/phpunit -c phpunit-plugins.xml \
+            --bootstrap Test/beplyplugintemplate-ci-bootstrap.php \
+            --testdox \
+            ${{ steps.unit-targets.outputs.targets }}
+
+      - name: Lint PHP sources
+        working-directory: facturascripts
+        run: |
+          find Plugins/BeplyPluginTemplate -type f -name '*.php' -not -path '*/vendor/*' -print0 | \
+            xargs -0 -n1 php -l
