@@ -9,6 +9,7 @@ on:
       - '.github/**'
       - 'README.md'
       - 'docs/**'
+      - 'Doc/**'
       - 'Test/**'
       - 'Tests/**'
       - 'tests/**'
@@ -29,8 +30,8 @@ permissions:
 jobs:
   verify_tests:
     name: Verify Tests Workflow
-    timeout-minutes: 20
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+    timeout-minutes: 50
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-latest' }}
 
     steps:
       - name: Wait for Tests workflow on this commit
@@ -38,6 +39,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           TARGET_SHA: ${{ github.sha }}
+          TARGET_REF_NAME: ${{ github.ref_name }}
           CURRENT_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -50,10 +52,11 @@ jobs:
 
           repository = os.environ["REPOSITORY"]
           target_sha = os.environ["TARGET_SHA"]
+          target_ref_name = os.environ["TARGET_REF_NAME"]
           current_run_id = int(os.environ["CURRENT_RUN_ID"])
           token = os.environ["GITHUB_TOKEN"]
           api_url = f"https://api.github.com/repos/{repository}/actions/runs?head_sha={target_sha}&per_page=100"
-          deadline = time.time() + 19 * 60
+          deadline = time.time() + 49 * 60
 
           def fetch_runs():
               request = urllib.request.Request(
@@ -71,7 +74,9 @@ jobs:
               payload = fetch_runs()
               runs = [
                   run for run in payload.get("workflow_runs", [])
-                  if run.get("name") == "Tests" and int(run.get("id", 0)) != current_run_id
+                  if run.get("name") == "Tests"
+                  and int(run.get("id", 0)) != current_run_id
+                  and run.get("head_branch") == target_ref_name
               ]
 
               if not runs:
@@ -102,9 +107,9 @@ jobs:
   upload_dev:
     name: Upload Dev Candidate
     needs: verify_tests
-    if: github.ref_type == 'branch' && github.ref_name == (vars.BEPLY_RELEASE_BRANCH || github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    if: github.ref_type == 'branch' && github.ref_name == (vars.BEPLY_RELEASE_BRANCH || 'main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     timeout-minutes: 15
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-latest' }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -143,6 +148,7 @@ jobs:
           excluded_roots = {
               ".git",
               ".github",
+              "Doc",
               "docs",
               "scripts",
               "Test",
@@ -186,7 +192,7 @@ jobs:
       - name: Upload candidate to Beply dev
         env:
           BEPLY_API_URL: https://api.services.devbeply.es
-          BEPLY_DEV_CI_TOKEN: ${{ secrets.BEPLY_DEV_CI_TOKEN }}
+          BEPLY_CI_TOKEN: ${{ secrets.BEPLY_DEV_CI_TOKEN || secrets.BEPLY_CI_TOKEN }}
           PLUGIN_NAME: ${{ steps.ini.outputs.name }}
           PLUGIN_VERSION: ${{ steps.ini.outputs.version }}
         run: |
@@ -196,13 +202,13 @@ jobs:
           SOURCE_TAG="${GITHUB_REF_NAME}-${GITHUB_SHA::12}"
           PUBLISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-          if [ -z "$BEPLY_DEV_CI_TOKEN" ]; then
-            echo "::warning::BEPLY_DEV_CI_TOKEN not configured. Skipping dev platform upload."
+          if [ -z "$BEPLY_CI_TOKEN" ]; then
+            echo "::warning::BEPLY_DEV_CI_TOKEN or BEPLY_CI_TOKEN not configured. Skipping dev platform upload."
             exit 0
           fi
 
           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
-            -H "Authorization: Bearer ${BEPLY_DEV_CI_TOKEN}" \
+            -H "Authorization: Bearer ${BEPLY_CI_TOKEN}" \
             -F "file=@${ZIP}" \
             -F "sourceRepoFullName=${{ github.repository }}" \
             -F "sourceReleaseTag=${SOURCE_TAG}" \
@@ -233,7 +239,7 @@ jobs:
     needs: verify_tests
     if: startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     timeout-minutes: 15
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-latest' }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -307,6 +313,7 @@ jobs:
           excluded_roots = {
               ".git",
               ".github",
+              "Doc",
               "docs",
               "scripts",
               "Test",
