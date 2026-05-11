@@ -18,5 +18,14 @@ final class TemplateManifestTest extends TestCase
         $this->assertStringContainsString('min_version = 2025.71', $manifest);
         $this->assertStringContainsString('min_php = 8.2', $manifest);
     }
-}
 
+    public function testInitImplementsFacturaScriptsRuntimeContract(): void
+    {
+        $init = file_get_contents(dirname(__DIR__) . '/Init.php');
+
+        $this->assertIsString($init);
+        $this->assertStringContainsString('public function init(): void', $init);
+        $this->assertStringContainsString('public function update(): void', $init);
+        $this->assertStringContainsString('public function uninstall(): void', $init);
+    }
+}

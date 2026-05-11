@@ -10,6 +10,10 @@ final class Init extends InitClass
     {
     }
 
+    public function uninstall(): void
+    {
+    }
+
     public function update(): void
     {
     }

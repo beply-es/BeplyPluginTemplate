@@ -23,5 +23,6 @@ final class TemplateSmokeTest extends TestCase
 
         $this->assertIsString($init);
         $this->assertStringContainsString('final class Init extends InitClass', $init);
+        $this->assertStringContainsString('public function uninstall(): void', $init);
     }
 }
