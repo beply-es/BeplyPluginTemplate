@@ -27,7 +27,7 @@ jobs:
   php84_compat:
     name: PHP 8.4 Compatibility
     timeout-minutes: 10
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-latest' }}
 
     steps:
       - name: Checkout Plugin
