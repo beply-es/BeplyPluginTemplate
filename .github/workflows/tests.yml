@@ -303,6 +303,7 @@ jobs:
           fi
 
   e2e:
+    if: github.ref_type != 'tag'
     needs: lint
     timeout-minutes: 25
     runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-latest' }}
@@ -403,7 +404,7 @@ jobs:
         working-directory: facturascripts/${{ steps.e2e-targets.outputs.tests_dir }}
         run: |
           npm ci
-          npx playwright install --with-deps chromium
+          npx playwright install chromium
 
       - name: Start PHP server
         if: steps.e2e-targets.outputs.has_tests == 'true'
