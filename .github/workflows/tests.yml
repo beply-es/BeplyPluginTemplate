@@ -24,6 +24,24 @@ permissions:
   contents: read
 
 jobs:
+  php84_compat:
+    name: PHP 8.4 Compatibility
+    timeout-minutes: 10
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+
+    steps:
+      - name: Checkout Plugin
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@accd6127cb78bee3e8082180cb391013d204ef9f # 2.37.0
+        with:
+          php-version: '8.4'
+          coverage: none
+
+      - name: Run PHP 8.4 compatibility scan
+        run: php scripts/ci/php84-compat-scan.php "$PWD"
+
   lint:
     timeout-minutes: 10
     runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-latest' }}
@@ -73,7 +91,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php-version: ['8.2', '8.4']
+        php-version: ['8.4']
 
     steps:
       - name: Checkout FacturaScripts
@@ -98,7 +116,9 @@ jobs:
 
       - name: Install Composer dependencies
         working-directory: facturascripts
-        run: composer install --no-interaction --prefer-dist
+        run: |
+          composer config platform.php 8.4.0
+          composer install --no-interaction --prefer-dist
 
       - name: Prepare config.php
         working-directory: facturascripts
@@ -177,7 +197,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php-version: ['8.2', '8.4']
+        php-version: ['8.4']
 
     steps:
       - name: Checkout FacturaScripts
@@ -219,7 +239,9 @@ jobs:
       - name: Install Composer dependencies
         if: steps.runtime-targets.outputs.has_tests == 'true'
         working-directory: facturascripts
-        run: composer install --no-interaction --prefer-dist
+        run: |
+          composer config platform.php 8.4.0
+          composer install --no-interaction --prefer-dist
 
       - name: Start local PostgreSQL
         if: steps.runtime-targets.outputs.has_tests == 'true'
@@ -329,7 +351,9 @@ jobs:
       - name: Install Composer dependencies
         if: steps.e2e-targets.outputs.has_tests == 'true'
         working-directory: facturascripts
-        run: composer install --no-interaction --prefer-dist
+        run: |
+          composer config platform.php 8.4.0
+          composer install --no-interaction --prefer-dist
 
       - name: Install core frontend dependencies
         if: steps.e2e-targets.outputs.has_tests == 'true'
@@ -409,7 +433,7 @@ jobs:
 
       - name: Upload Playwright artifacts
         if: failure() && steps.e2e-targets.outputs.has_tests == 'true'
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
         with:
           name: ${{ env.PLUGIN_FOLDER }}-e2e-artifacts
           path: |

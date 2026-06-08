@@ -11,8 +11,8 @@ Plantilla base para arrancar un plugin Beply de FacturaScripts con estructura mi
 | Nombre de plugin | `BeplyPluginTemplate` |
 | Version actual | `1.0` |
 | Compatibilidad declarada | `FacturaScripts 2025.71+` |
-| PHP minimo declarado | `8.2` |
-| Stack objetivo Beply | `FacturaScripts 2025.71 / PHP 8.2` |
+| PHP minimo declarado | `8.4` |
+| Stack objetivo Beply | `FacturaScripts 2025.71 / PHP 8.4` |
 | Estado de manifiesto | `Alineado con stack Beply` |
 | Rama operativa | `main` |
 
