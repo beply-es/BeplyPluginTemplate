@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "template": "beply-es/BeplyPluginTemplate",
+  "version": "1.4",
+  "ref": "v1.4",
+  "mode": "initial-scaffold-plus-controlled-tooling-sync",
+  "notes": [
+    "La plantilla se usa al crear el plugin.",
+    "Las actualizaciones posteriores solo deben sincronizar tooling comun y contratos.",
+    "No sincronizar automaticamente codigo de producto, docs de usuario reales, manifest de tools real ni matrices reales del plugin."
+  ]
+}

@@ -5,15 +5,6 @@ on:
     branches:
       - '**'
     tags: ['v*']
-    paths-ignore:
-      - '.github/**'
-      - 'README.md'
-      - 'docs/**'
-      - 'Doc/**'
-      - 'Test/**'
-      - 'Tests/**'
-      - 'tests/**'
-      - 'coverage-html/**'
   workflow_dispatch:
 
 env:
@@ -31,7 +22,7 @@ jobs:
   verify_tests:
     name: Verify Tests Workflow
     timeout-minutes: 50
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
 
     steps:
       - name: Wait for Tests workflow on this commit
@@ -104,12 +95,40 @@ jobs:
           sys.exit(1)
           PY
 
+  docs_release_audit:
+    name: Documentation Release Audit
+    needs: verify_tests
+    timeout-minutes: 12
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '24'
+
+      - name: Static docs impact audit
+        if: github.ref_type != 'tag'
+        run: node scripts/ci/validate-docs-impact.mjs
+
+      - name: AI docs impact audit for release tags
+        if: github.ref_type == 'tag'
+        env:
+          BEPLY_DOCS_AI_API_KEY: ${{ secrets.BEPLY_DOCS_AI_API_KEY }}
+          BEPLY_DOCS_AI_MODEL: ${{ secrets.BEPLY_DOCS_AI_MODEL }}
+          BEPLY_DOCS_AI_PROVIDER: ${{ secrets.BEPLY_DOCS_AI_PROVIDER || 'openai' }}
+        run: node scripts/ci/validate-docs-impact.mjs --require-ai
+
   upload_dev:
     name: Upload Dev Candidate
-    needs: verify_tests
+    needs: docs_release_audit
     if: github.ref_type == 'branch' && github.ref_name == (vars.BEPLY_RELEASE_BRANCH || 'main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     timeout-minutes: 15
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -199,7 +218,7 @@ jobs:
           set -e
           ZIP="/tmp/${PLUGIN_NAME}-dev-${PLUGIN_VERSION}.zip"
           SOURCE_URL="https://github.com/${{ github.repository }}/commit/${{ github.sha }}"
-          SOURCE_TAG="${GITHUB_REF_NAME}-${GITHUB_SHA::12}"
+          SOURCE_TAG="${GITHUB_REF_NAME}-${GITHUB_SHA}"
           PUBLISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
           if [ -z "$BEPLY_CI_TOKEN" ]; then
@@ -236,10 +255,10 @@ jobs:
 
   release_prod:
     name: Release Prod Candidate
-    needs: verify_tests
+    needs: docs_release_audit
     if: startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     timeout-minutes: 15
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6

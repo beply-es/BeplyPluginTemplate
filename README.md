@@ -1,6 +1,6 @@
 # BeplyPluginTemplate
 
-Plantilla base para arrancar un plugin Beply de FacturaScripts con estructura minima, README normalizado y CI/CD listo para publicar candidatos `dev` y releases `prod`.
+Plantilla base para arrancar un plugin Beply de FacturaScripts con workflow Codex, testing multiversion, documentacion de usuario/base, contrato de tools IA y CI/CD listo para publicar candidatos `dev` y releases `prod`.
 
 ## Estado y compatibilidad
 
@@ -9,36 +9,77 @@ Plantilla base para arrancar un plugin Beply de FacturaScripts con estructura mi
 | Estado | Plantilla base |
 | Tipo | Scaffold reutilizable |
 | Nombre de plugin | `BeplyPluginTemplate` |
-| Version actual | `1.0` |
-| Compatibilidad declarada | `FacturaScripts 2025.71+` |
+| Version actual | `1.4` |
+| Compatibilidad declarada | `FacturaScripts 2026.2+` |
 | PHP minimo declarado | `8.4` |
-| Stack objetivo Beply | `FacturaScripts 2025.71 / PHP 8.4` |
+| Stack objetivo Beply | `FacturaScripts v2026.3 y v2026.2 / PHP 8.4` |
 | Estado de manifiesto | `Alineado con stack Beply` |
 | Rama operativa | `main` |
 
 ## Capacidades principales
 
-- Aporta una estructura minima de plugin FacturaScripts lista para renombrar y extender.
-- Incluye un `Tests` baseline que clona FacturaScripts, instala dependencias y ejecuta PHPUnit o lint segun el contenido real del plugin.
-- Si el plugin llega a declarar `facturascripts/core` en `composer.json`, el workflow omite ese `composer install` local porque el core ya lo aporta el checkout anfitrion.
+- Aporta una estructura completa de plugin FacturaScripts lista para renombrar y extender.
+- Incluye contrato de trabajo para Codex en `AGENTS.md` y `docs/CODEX-WORKFLOW.md`.
+- Declara matriz FacturaScripts en `.beply/facturascripts-matrix.json`; la base actual prueba `v2026.3` y `v2026.2`.
+- Incluye gates para unit, runtime, E2E, PHP 8.4, cobertura UI, documentacion y release.
+- Incluye documentacion de usuario local en `docs/user/` y mapa de impacto base/modulo en `docs/docs-sync/`.
+- Incluye `Tools/manifest.json` y provider compatible con `BeplyAgents`.
+- Incluye flujo clean-room para ROM copy visual sin copiar codigo del original.
+- Incluye lock y sync controlado de plantilla para actualizar tooling comun sin pisar producto.
 - Incluye `Release Plugin` con gate sobre `Tests`, candidato `dev` desde la rama operativa y `prod` solo desde tags `v*`.
-- Sirve como base para documentar compatibilidad, capacidades y contrato de release de nuevos plugins Beply.
+- Sirve como base para documentar compatibilidad, capacidades, tools y contrato de release de nuevos plugins Beply.
 
 ## CI/CD
 
 | Evento | Flujo | Resultado |
 | --- | --- | --- |
-| `push` a la rama operativa u otra rama | `Tests` | Ejecuta `phpunit` si encuentra tests y siempre hace lint de PHP. |
+| `push` a cualquier rama | `Tests` | Valida contrato, docs, PHP 8.4, lint, unit, runtime y E2E contra la matriz FacturaScripts. |
 | `pull_request` | `Tests` | Valida el cambio sin publicar artefactos. |
-| `tag vX.Y` | `Tests` + `Release Plugin` | Si `Tests` pasa, genera release de prod y sube el ZIP con `BEPLY_CI_TOKEN`. |
+| `main` | `Release Plugin` | Si `Tests` pasa, audita docs y sube candidato `dev`. |
+| `tag vX.Y` | `Tests` + `Release Plugin` | Exige auditoria IA de docs, genera release de prod y sube el ZIP con `BEPLY_CI_TOKEN`. |
 | `workflow_dispatch` | `Release Plugin` | Permite reintentar la publicacion sobre un SHA ya validado. |
 
 Nota: el candidato `dev` usa `BEPLY_DEV_CI_TOKEN`. Si el secreto no existe, la subida `dev` se omite con aviso y no bloquea el workflow.
 
 ## Uso recomendado
 
-1. Renombrar la carpeta y el namespace del plugin.
-2. Ajustar `facturascripts.ini` sin salir del formato de version `X.Y`.
-3. Sustituir el smoke test por tests reales del dominio.
-4. Completar `Controller/`, `Model/`, `Table/` y `XMLView/` segun la necesidad del plugin.
-5. Revisar si el repo debe publicar desde `main` o declarar `BEPLY_RELEASE_BRANCH`.
+1. Renombrar la carpeta, namespace y `facturascripts.ini`.
+2. Confirmar o ampliar `.beply/facturascripts-matrix.json`.
+3. Sustituir el smoke por tests reales unit/runtime/E2E.
+4. Completar `docs/user/`, `docs/docs-sync/impact-map.json` y `docs/testing/ui-coverage-matrix.json`.
+5. Declarar tools IA en `Tools/manifest.json` si el plugin modifica el chat/agente.
+6. Revisar si el repo debe publicar desde `main` o declarar `BEPLY_RELEASE_BRANCH`.
+
+## Actualizacion desde plantilla
+
+La plantilla se usa al crear el plugin. Despues, el producto manda. Si se quiere
+traer mejoras comunes de la plantilla, usar solo el sync controlado:
+
+```bash
+node scripts/template/sync-template.mjs --ref v1.4
+node scripts/template/sync-template.mjs --ref v1.4 --apply
+```
+
+El sync actualiza CI, scripts, docs de proceso y contratos comunes. No pisa
+codigo del plugin, documentacion de usuario, `Tools/manifest.json`, matriz de
+cobertura ni impact-map reales del plugin.
+
+## Documentacion
+
+Cada cambio funcional debe actualizar:
+
+- pagina local del plugin en `docs/user/`;
+- impacto sobre pagina base en `docs/docs-sync/impact-map.json`;
+- URLs auditadas en `docs/docs-sync/published-pages.json`;
+- matriz de controles en `docs/testing/ui-coverage-matrix.json`.
+
+Para sincronizar docs locales con un checkout de documentacion:
+
+```bash
+node scripts/docs/sync-docs.mjs
+BEPLY_DOCS_REPO_PATH=/ruta/a/beply-web node scripts/docs/sync-docs.mjs --apply
+```
+
+## Tools IA
+
+El contrato vive en `Tools/manifest.json`. `Lib/BeplyAgentToolProvider.php` expone tools/packs/runtime definitions para `BeplyAgents`. Por defecto no publica tools productivas; cada plugin debe declarar las suyas y probarlas.

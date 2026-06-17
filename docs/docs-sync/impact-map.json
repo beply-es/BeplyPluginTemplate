@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "plugin": "BeplyPluginTemplate",
+  "versionFrom": "facturascripts.ini",
+  "impacts": [
+    {
+      "id": "beplyplugintemplate-template-contract",
+      "basePage": {
+        "path": "programa-facturacion/modulos/desarrollo-plugins",
+        "title": "Desarrollo de plugins"
+      },
+      "pluginPage": {
+        "path": "docs/user/modulo.md",
+        "title": "BeplyPluginTemplate"
+      },
+      "surfaces": [
+        "AdminPlugins",
+        "GitHub Actions",
+        "BeplyAgents ToolCatalogRegistry"
+      ],
+      "changes": {
+        "fields": [],
+        "actions": [
+          "Validar matriz FacturaScripts",
+          "Ejecutar testing unitario, runtime y E2E",
+          "Auditar documentacion con IA en tags",
+          "Publicar tools IA mediante manifest"
+        ],
+        "flows": [
+          "Crear plugin desde plantilla",
+          "Publicar candidato dev",
+          "Publicar candidato prod"
+        ],
+        "permissions": [
+          "GitHub Actions secrets",
+          "Beply platform CI token"
+        ]
+      },
+      "tests": [
+        "Test/TemplateManifestTest.php",
+        "Test/main/TemplateSmokeTest.php",
+        "tests/e2e/smoke.spec.ts"
+      ],
+      "status": "documented"
+    }
+  ]
+}

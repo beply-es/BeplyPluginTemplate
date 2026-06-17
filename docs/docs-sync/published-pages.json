@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "plugin": "BeplyPluginTemplate",
+  "pages": [
+    {
+      "id": "beplyplugintemplate-template-contract",
+      "localPath": "docs/user/modulo.md",
+      "publishedUrl": "https://beply.es/help/programa-facturacion/modulos/desarrollo-plugins",
+      "baseUrl": "https://beply.es/help/programa-facturacion"
+    }
+  ]
+}

@@ -13,7 +13,7 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   TZ: Europe/Madrid
   FS_E2E_TIMEZONE: Europe/Madrid
-  FACTURASCRIPTS_REF: v2025.71
+  FACTURASCRIPTS_REF: v2026.3
   PLUGIN_FOLDER: ${{ github.event.repository.name }}
 
 concurrency:
@@ -24,10 +24,36 @@ permissions:
   contents: read
 
 jobs:
+  quality_contract:
+    name: Quality Contract
+    timeout-minutes: 10
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+
+    steps:
+      - name: Checkout Plugin
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '24'
+
+      - name: Validate template contract
+        run: node scripts/ci/validate-template-contract.mjs
+
+      - name: Validate release workflow model
+        run: node scripts/ci/validate-release-model.mjs
+
+      - name: Validate documentation impact
+        run: node scripts/ci/validate-docs-impact.mjs
+
   php84_compat:
     name: PHP 8.4 Compatibility
+    needs: quality_contract
     timeout-minutes: 10
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
 
     steps:
       - name: Checkout Plugin
@@ -43,15 +69,21 @@ jobs:
         run: php scripts/ci/php84-compat-scan.php "$PWD"
 
   lint:
+    name: Lint FS ${{ matrix.facturascripts-ref }}
+    needs: quality_contract
     timeout-minutes: 10
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        facturascripts-ref: ['v2026.3', 'v2026.2']
 
     steps:
       - name: Checkout FacturaScripts
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: NeoRazorX/facturascripts
-          ref: ${{ env.FACTURASCRIPTS_REF }}
+          ref: ${{ matrix.facturascripts-ref }}
           path: facturascripts
 
       - name: Checkout Plugin
@@ -85,20 +117,22 @@ jobs:
           printf '%s\0' "${files[@]}" | xargs -0 -n1 -P4 php -l
 
   unit:
+    name: Unit FS ${{ matrix.facturascripts-ref }} PHP ${{ matrix.php-version }}
     needs: lint
     timeout-minutes: 20
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
     strategy:
       fail-fast: false
       matrix:
         php-version: ['8.4']
+        facturascripts-ref: ['v2026.3', 'v2026.2']
 
     steps:
       - name: Checkout FacturaScripts
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: NeoRazorX/facturascripts
-          ref: ${{ env.FACTURASCRIPTS_REF }}
+          ref: ${{ matrix.facturascripts-ref }}
           path: facturascripts
 
       - name: Checkout Plugin
@@ -150,16 +184,16 @@ jobs:
         working-directory: facturascripts
         run: |
           if [ ! -f "Plugins/${PLUGIN_FOLDER}/phpunit.unit.xml.dist" ]; then
-            echo "has_tests=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "::error::Missing phpunit.unit.xml.dist"
+            exit 1
           fi
 
           if ! {
             find "Plugins/${PLUGIN_FOLDER}/tests" -type f -name '*Test.php' ! -path "Plugins/${PLUGIN_FOLDER}/tests/runtime/*" 2>/dev/null
             find "Plugins/${PLUGIN_FOLDER}/Test" -maxdepth 1 -type f -name '*Test.php' 2>/dev/null
           } | grep -q .; then
-            echo "has_tests=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "::error::Missing unit tests"
+            exit 1
           fi
 
           {
@@ -191,20 +225,22 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   runtime:
+    name: Runtime FS ${{ matrix.facturascripts-ref }} PHP ${{ matrix.php-version }}
     needs: lint
     timeout-minutes: 20
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
     strategy:
       fail-fast: false
       matrix:
         php-version: ['8.4']
+        facturascripts-ref: ['v2026.3', 'v2026.2']
 
     steps:
       - name: Checkout FacturaScripts
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: NeoRazorX/facturascripts
-          ref: ${{ env.FACTURASCRIPTS_REF }}
+          ref: ${{ matrix.facturascripts-ref }}
           path: facturascripts
 
       - name: Checkout Plugin
@@ -225,15 +261,16 @@ jobs:
         working-directory: facturascripts
         run: |
           if [ ! -f "Plugins/${PLUGIN_FOLDER}/phpunit.runtime.xml.dist" ]; then
-            echo "has_tests=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "::error::Missing phpunit.runtime.xml.dist"
+            exit 1
           fi
 
           if find "Plugins/${PLUGIN_FOLDER}/tests/runtime" "Plugins/${PLUGIN_FOLDER}/Test/main" -type f -name '*Test.php' 2>/dev/null | grep -q .; then
             echo "has_tests=true" >> "$GITHUB_OUTPUT"
             echo "config=Plugins/${PLUGIN_FOLDER}/phpunit.runtime.xml.dist" >> "$GITHUB_OUTPUT"
           else
-            echo "has_tests=false" >> "$GITHUB_OUTPUT"
+            echo "::error::Missing runtime tests"
+            exit 1
           fi
 
       - name: Install Composer dependencies
@@ -303,10 +340,14 @@ jobs:
           fi
 
   e2e:
-    if: github.ref_type != 'tag'
+    name: E2E FS ${{ matrix.facturascripts-ref }}
     needs: lint
     timeout-minutes: 25
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        facturascripts-ref: ['v2026.3', 'v2026.2']
     env:
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
 
@@ -315,7 +356,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: NeoRazorX/facturascripts
-          ref: ${{ env.FACTURASCRIPTS_REF }}
+          ref: ${{ matrix.facturascripts-ref }}
           path: facturascripts
 
       - name: Checkout Plugin
@@ -340,7 +381,8 @@ jobs:
             echo "has_tests=true" >> "$GITHUB_OUTPUT"
             echo "tests_dir=${TESTS_DIR}" >> "$GITHUB_OUTPUT"
           else
-            echo "has_tests=false" >> "$GITHUB_OUTPUT"
+            echo "::error::Missing E2E Playwright tests"
+            exit 1
           fi
 
       - name: Setup Node.js

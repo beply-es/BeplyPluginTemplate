@@ -25,4 +25,13 @@ final class TemplateSmokeTest extends TestCase
         $this->assertStringContainsString('final class Init extends InitClass', $init);
         $this->assertStringContainsString('public function uninstall(): void', $init);
     }
+
+    public function testToolsProviderScaffoldExistsForBeplyAgents(): void
+    {
+        $root = dirname(__DIR__, 2);
+
+        $this->assertFileExists($root . '/Lib/BeplyAgentToolProvider.php');
+        $this->assertFileExists($root . '/Lib/TemplateToolsManifest.php');
+        $this->assertFileExists($root . '/Lib/TemplateToolExecutor.php');
+    }
 }

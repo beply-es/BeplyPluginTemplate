@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "beply.facturascripts-plugin-tools.v1",
+  "manifestVersion": "1.0.0",
+  "plugin": {
+    "name": "BeplyPluginTemplate",
+    "versionFrom": "facturascripts.ini"
+  },
+  "executionPolicy": {
+    "defaultMode": "review_required",
+    "autonomousMutationsAllowed": false,
+    "dangerousAutonomousMutationsAllowed": false,
+    "humanReviewRequired": true
+  },
+  "coreOverrides": [],
+  "tools": [],
+  "toolPacks": [],
+  "runtimeTools": [],
+  "resources": [],
+  "permissions": [],
+  "docs": {
+    "contract": "docs/AI-TOOLS-MANIFEST.md",
+    "userDocs": "docs/user/README.md"
+  },
+  "tests": {
+    "unit": ["Test/TemplateManifestTest.php"],
+    "runtime": ["Test/main/TemplateSmokeTest.php"],
+    "e2e": ["tests/e2e/smoke.spec.ts"]
+  }
+}

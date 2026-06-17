@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "verifiedAt": "2026-06-09",
+  "source": "https://packagist.org/packages/facturascripts/facturascripts",
+  "defaultRef": "v2026.3",
+  "phpVersions": ["8.4"],
+  "supported": [
+    {
+      "ref": "v2026.3",
+      "role": "latest",
+      "php": "8.4",
+      "required": true
+    },
+    {
+      "ref": "v2026.2",
+      "role": "previous",
+      "php": "8.4",
+      "required": true
+    }
+  ],
+  "canary": []
+}

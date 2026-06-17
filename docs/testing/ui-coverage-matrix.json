@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "plugin": "BeplyPluginTemplate",
+  "surfaces": [
+    {
+      "id": "admin-plugins-template-row",
+      "title": "AdminPlugins muestra BeplyPluginTemplate",
+      "route": "/AdminPlugins",
+      "controls": [
+        {
+          "id": "adminplugins.plugin-row.beplyplugintemplate",
+          "label": "BeplyPluginTemplate",
+          "type": "state",
+          "surface": "AdminPlugins",
+          "preconditions": [
+            "Plugin instalado en FacturaScripts runtime"
+          ],
+          "testIds": [
+            "tests/e2e/smoke.spec.ts::template plugin can be enabled in a real browser runtime"
+          ],
+          "cleanup": [
+            "Base runtime efimera"
+          ]
+        }
+      ]
+    }
+  ]
+}
