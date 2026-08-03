@@ -31,6 +31,7 @@ EXCLUDED_NAMES = {
     "package.json",
     "package-lock.json",
     "playwright.config.ts",
+    "run-tests.sh",
     "coverage.xml",
     "coverage-report.txt",
 }

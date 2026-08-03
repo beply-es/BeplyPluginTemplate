@@ -160,6 +160,7 @@ class DeterministicPluginZipTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (root / "Init.php").write_text("<?php\n", encoding="utf-8")
+            (root / "run-tests.sh").write_text("#!/bin/sh\n", encoding="utf-8")
             (root / ".github").mkdir()
             (root / ".github/workflow.yml").write_text("secret tooling", encoding="utf-8")
             (root / "docs").mkdir()
