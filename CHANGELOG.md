@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Anade el contrato reutilizable build-once para publicar un unico asset
+  inmutable en DEV y promover exactamente los mismos bytes a PROD tras DEV100.
+- Define evidencia machine-readable fail-closed para UUID/versionId, SHA-256,
+  bytes, tag y source SHA.
+- Convierte los workflows del template en adapters finos y evita que el sync
+  sobrescriba adapters de release existentes durante la migracion de plugins.
+
 ## v1.4 - 2026-06-17
 
 - Anade contratos de plantilla para desarrollo Codex, testing multiversion,

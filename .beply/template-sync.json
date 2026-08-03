@@ -9,7 +9,6 @@
     ".github/ci/start-local-postgres.sh",
     ".github/ci/unit-bootstrap.php",
     ".github/workflows/tests.yml",
-    ".github/workflows/release.yml",
     "docs/AI-TOOLS-MANIFEST.md",
     "docs/CI-CD.md",
     "docs/CODEX-WORKFLOW.md",
@@ -19,6 +18,10 @@
     "docs/TEMPLATE-SYNC.md",
     "docs/TESTING.md",
     "scripts/ci/php84-compat-scan.php",
+    "scripts/ci/build_plugin_zip.py",
+    "scripts/ci/build_plugin_artifact_attestation.mjs",
+    "scripts/ci/immutable_plugin_contract.py",
+    "scripts/ci/test_immutable_plugin_contract.py",
     "scripts/ci/validate-docs-impact.mjs",
     "scripts/ci/validate-release-model.mjs",
     "scripts/ci/validate-template-contract.mjs",
@@ -26,6 +29,8 @@
     "scripts/template/sync-template.mjs"
   ],
   "createIfMissing": [
+    ".github/workflows/release.yml",
+    ".github/workflows/promote-prod.yml",
     ".beply/facturascripts-matrix.json",
     ".beply/template-sync.json",
     "Tools/README.md",

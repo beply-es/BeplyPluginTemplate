@@ -63,14 +63,25 @@ for (const path of [
   'tests/e2e/smoke.spec.ts',
   'phpunit.unit.xml.dist',
   'phpunit.runtime.xml.dist',
+  'scripts/ci/build_plugin_zip.py',
+  'scripts/ci/build_plugin_artifact_attestation.mjs',
+  'scripts/ci/immutable_plugin_contract.py',
+  'scripts/ci/test_immutable_plugin_contract.py',
   'scripts/template/sync-template.mjs',
 ]) {
   requireFile(path)
 }
 
 const ini = parseIni('facturascripts.ini')
-if (ini.name !== 'BeplyPluginTemplate') {
-  fail(`facturascripts.ini name must be BeplyPluginTemplate, got ${ini.name}`)
+const isTemplate = ini.name === 'BeplyPluginTemplate'
+if (isTemplate) {
+  for (const path of [
+    '.github/workflows/reusable-immutable-plugin-candidate.yml',
+    '.github/workflows/reusable-promote-immutable-plugin-candidate.yml',
+    '.github/workflows/promote-prod.yml',
+  ]) {
+    requireFile(path)
+  }
 }
 if (!/^\d+\.\d+$/.test(ini.version || '')) {
   fail('facturascripts.ini version must use X.Y format')
@@ -89,7 +100,7 @@ const templateLock = readJson('.beply/template-lock.json')
 if (templateLock.template !== 'beply-es/BeplyPluginTemplate') {
   fail('template-lock template must be beply-es/BeplyPluginTemplate')
 }
-if (templateLock.version !== ini.version) {
+if (isTemplate && templateLock.version !== ini.version) {
   fail('template-lock version must match facturascripts.ini')
 }
 
@@ -105,6 +116,14 @@ for (const forbidden of ['Init.php', 'Tools/manifest.json', 'docs/user/', 'docs/
 for (const forbidden of templateSync.neverOverwrite || []) {
   if ((templateSync.overwrite || []).includes(forbidden)) {
     fail(`template-sync cannot overwrite protected path ${forbidden}`)
+  }
+}
+for (const adapter of ['.github/workflows/release.yml', '.github/workflows/promote-prod.yml']) {
+  if ((templateSync.overwrite || []).includes(adapter)) {
+    fail(`template-sync must not overwrite product release adapter ${adapter}`)
+  }
+  if (!(templateSync.createIfMissing || []).includes(adapter)) {
+    fail(`template-sync must create missing release adapter ${adapter}`)
   }
 }
 for (const ref of ['v2026.3', 'v2026.2']) {

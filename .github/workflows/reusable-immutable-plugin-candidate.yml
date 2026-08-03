@@ -1,0 +1,287 @@
+name: Reusable Immutable Plugin Candidate
+
+on:
+  workflow_call:
+    inputs:
+      contract_sha:
+        description: Exact BeplyPluginTemplate commit that owns this contract
+        required: true
+        type: string
+      dev_api_url:
+        description: DEV platform API origin
+        required: false
+        default: https://api.services.devbeply.es
+        type: string
+      release_track:
+        description: Exact catalog release track
+        required: false
+        default: main
+        type: string
+      dev_artifact_prefix:
+        description: DEV artifact attestation prefix
+        required: false
+        default: plugins/dev
+        type: string
+    secrets:
+      BEPLY_PLUGIN_TEMPLATE_READ_TOKEN:
+        required: true
+      BEPLY_DEV_CI_TOKEN:
+        required: true
+      BEPLY_DEV_PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY:
+        required: false
+      BEPLY_DEV_PLUGIN_ARTIFACT_SIGNATURE_KEY_ID:
+        required: false
+    outputs:
+      plugin_name:
+        value: ${{ jobs.publish.outputs.plugin_name }}
+      plugin_version:
+        value: ${{ jobs.publish.outputs.plugin_version }}
+      plugin_id:
+        value: ${{ jobs.publish.outputs.plugin_id }}
+      version_id:
+        value: ${{ jobs.publish.outputs.version_id }}
+      checksum:
+        value: ${{ jobs.publish.outputs.checksum }}
+      file_size:
+        value: ${{ jobs.publish.outputs.file_size }}
+      release_tag:
+        value: ${{ jobs.publish.outputs.release_tag }}
+      source_sha:
+        value: ${{ jobs.publish.outputs.source_sha }}
+      candidate_evidence_json:
+        value: ${{ jobs.publish.outputs.candidate_evidence_json }}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  publish:
+    name: Publish One Immutable Candidate And Upload Same Bytes To DEV
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    outputs:
+      plugin_name: ${{ steps.ini.outputs.name }}
+      plugin_version: ${{ steps.ini.outputs.version }}
+      plugin_id: ${{ steps.upload_dev.outputs.plugin_id }}
+      version_id: ${{ steps.upload_dev.outputs.version_id }}
+      checksum: ${{ steps.measure.outputs.checksum }}
+      file_size: ${{ steps.measure.outputs.file_size }}
+      release_tag: ${{ github.ref_name }}
+      source_sha: ${{ github.sha }}
+      candidate_evidence_json: ${{ steps.upload_dev.outputs.candidate_evidence_json }}
+    steps:
+      - name: Checkout caller plugin at exact source SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          path: plugin
+          fetch-depth: 0
+
+      - name: Checkout immutable promotion contract
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: beply-es/BeplyPluginTemplate
+          ref: ${{ inputs.contract_sha }}
+          path: contract
+          token: ${{ secrets.BEPLY_PLUGIN_TEMPLATE_READ_TOKEN }}
+
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "24"
+
+      - name: Validate immutable caller and contract identities
+        env:
+          CONTRACT_SHA: ${{ inputs.contract_sha }}
+          RELEASE_TRACK: ${{ inputs.release_track }}
+        run: |
+          set -euo pipefail
+          case "${CONTRACT_SHA}" in ????????????????????????????????????????) ;; *) echo "::error::contract_sha must be 40 hex"; exit 1;; esac
+          case "${CONTRACT_SHA}" in *[!0-9a-f]*) echo "::error::contract_sha must be lowercase hex"; exit 1;; esac
+          test "$(git -C contract rev-parse HEAD)" = "${CONTRACT_SHA}" || { echo "::error::contract checkout mismatch"; exit 1; }
+          test "$(git -C plugin rev-parse HEAD)" = "${GITHUB_SHA}" || { echo "::error::caller source SHA mismatch"; exit 1; }
+          test "${GITHUB_EVENT_NAME}" = "push" || { echo "::error::candidate must originate from a tag push"; exit 1; }
+          test "${GITHUB_REF_TYPE}" = "tag" || { echo "::error::candidate requires an immutable tag"; exit 1; }
+          test "${RELEASE_TRACK}" = "main" || { echo "::error::release track must be exactly main"; exit 1; }
+
+      - name: Parse and validate plugin identity
+        id: ini
+        working-directory: plugin
+        run: |
+          set -euo pipefail
+          parse_field() {
+            grep -E "^$1\\s*=" facturascripts.ini | head -1 | sed 's/^[^=]*=[ ]*//' | tr -d '"\r' | xargs
+          }
+          NAME="$(parse_field name)"
+          VERSION="$(parse_field version)"
+          test -n "${NAME}" && test -n "${VERSION}"
+          test "${GITHUB_REF_NAME}" = "v${VERSION}" || { echo "::error::tag/version mismatch"; exit 1; }
+          {
+            echo "name=${NAME}"
+            echo "version=${VERSION}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Resolve immutable release asset state
+        id: release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          ASSET_NAME: ${{ steps.ini.outputs.name }}-v${{ steps.ini.outputs.version }}.zip
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
+
+          request = urllib.request.Request(
+              f"https://api.github.com/repos/{os.environ['REPOSITORY']}/releases/tags/{os.environ['RELEASE_TAG']}",
+              headers={
+                  "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+                  "Accept": "application/vnd.github+json",
+                  "User-Agent": "beply-plugin-immutable-candidate",
+              },
+          )
+          try:
+              with urllib.request.urlopen(request) as response:
+                  payload = json.load(response)
+          except urllib.error.HTTPError as exc:
+              if exc.code == 404:
+                  with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+                      output.write("exists=false\n")
+                  sys.exit(0)
+              print(f"release lookup failed with HTTP {exc.code}", file=sys.stderr)
+              sys.exit(1)
+          if payload.get("draft") is not False:
+              print("existing immutable release is draft", file=sys.stderr)
+              sys.exit(1)
+          matching = [asset for asset in payload.get("assets", []) if asset.get("name") == os.environ["ASSET_NAME"]]
+          if len(matching) != 1 or int(matching[0].get("size", 0)) <= 0:
+              print("existing immutable release does not contain exactly one non-empty canonical asset", file=sys.stderr)
+              sys.exit(1)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("exists=true\n")
+          PY
+
+      - name: Build plugin ZIP exactly once
+        if: steps.release.outputs.exists != 'true'
+        id: build
+        run: >-
+          python3 contract/scripts/ci/build_plugin_zip.py
+          --plugin-root plugin
+          --plugin-name "${{ steps.ini.outputs.name }}"
+          --plugin-version "${{ steps.ini.outputs.version }}"
+          --output "/tmp/${{ steps.ini.outputs.name }}-v${{ steps.ini.outputs.version }}.zip"
+
+      - name: Create immutable GitHub Release asset
+        if: steps.release.outputs.exists != 'true'
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ steps.ini.outputs.name }} ${{ github.ref_name }}
+          generate_release_notes: true
+          files: /tmp/${{ steps.ini.outputs.name }}-v${{ steps.ini.outputs.version }}.zip
+
+      - name: Download existing immutable release asset without rebuilding
+        if: steps.release.outputs.exists == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release download "${GITHUB_REF_NAME}"
+          --repo "${GITHUB_REPOSITORY}"
+          --pattern "${{ steps.ini.outputs.name }}-v${{ steps.ini.outputs.version }}.zip"
+          --dir /tmp
+
+      - name: Measure exact immutable asset
+        id: measure
+        env:
+          ASSET: /tmp/${{ steps.ini.outputs.name }}-v${{ steps.ini.outputs.version }}.zip
+        run: |
+          set -euo pipefail
+          test -s "${ASSET}"
+          {
+            echo "checksum=sha256:$(sha256sum "${ASSET}" | awk '{print $1}')"
+            echo "file_size=$(stat -c %s "${ASSET}")"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Generate DEV artifact attestation from immutable bytes
+        id: attestation
+        env:
+          PLUGIN_NAME: ${{ steps.ini.outputs.name }}
+          PLUGIN_VERSION: ${{ steps.ini.outputs.version }}
+          PLUGIN_ZIP: /tmp/${{ steps.ini.outputs.name }}-v${{ steps.ini.outputs.version }}.zip
+          PLUGIN_RELEASE_TRACK: ${{ inputs.release_track }}
+          PLUGIN_ARTIFACT_PREFIX: ${{ inputs.dev_artifact_prefix }}
+          SOURCE_REPO_FULL_NAME: ${{ github.repository }}
+          SOURCE_RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_RELEASE_URL: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}
+          SOURCE_SHA: ${{ github.sha }}
+          PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY: ${{ secrets.BEPLY_DEV_PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY }}
+          PLUGIN_ARTIFACT_SIGNATURE_KEY_ID: ${{ secrets.BEPLY_DEV_PLUGIN_ARTIFACT_SIGNATURE_KEY_ID }}
+        run: node contract/scripts/ci/build_plugin_artifact_attestation.mjs
+
+      - name: Upload exact immutable bytes to DEV pending canonical approval
+        id: upload_dev
+        env:
+          BEPLY_API_URL: ${{ inputs.dev_api_url }}
+          BEPLY_CI_TOKEN: ${{ secrets.BEPLY_DEV_CI_TOKEN }}
+          PLUGIN_NAME: ${{ steps.ini.outputs.name }}
+          PLUGIN_VERSION: ${{ steps.ini.outputs.version }}
+          CHECKSUM: ${{ steps.measure.outputs.checksum }}
+          FILE_SIZE: ${{ steps.measure.outputs.file_size }}
+          RELEASE_TRACK: ${{ inputs.release_track }}
+          HAS_ATTESTATION: ${{ steps.attestation.outputs.has_attestation }}
+        run: |
+          set -euo pipefail
+          test -n "${BEPLY_CI_TOKEN}" || { echo "::error::BEPLY_DEV_CI_TOKEN is required"; exit 1; }
+          ZIP="/tmp/${PLUGIN_NAME}-v${PLUGIN_VERSION}.zip"
+          test "${{ steps.attestation.outputs.artifact_checksum }}" = "${CHECKSUM}" || { echo "::error::DEV attestation checksum drift"; exit 1; }
+          CURL_FIELDS=(
+            -F "file=@${ZIP}"
+            -F "sourceRepoFullName=${GITHUB_REPOSITORY}"
+            -F "sourceBranch=${RELEASE_TRACK}"
+            -F "sourceReleaseTag=${GITHUB_REF_NAME}"
+            -F "sourceReleaseUrl=https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}"
+            -F "sourcePublishedAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          )
+          if [ "${HAS_ATTESTATION}" = "true" ]; then
+            CURL_FIELDS+=(
+              -F "artifactSignature=${{ steps.attestation.outputs.artifact_signature }}"
+              -F "artifactSignatureKeyId=${{ steps.attestation.outputs.artifact_signature_key_id }}"
+              -F "sbomUrl=${{ steps.attestation.outputs.sbom_url }}"
+              -F "sbomChecksum=${{ steps.attestation.outputs.sbom_checksum }}"
+              -F "artifactPolicyVersion=${{ steps.attestation.outputs.artifact_policy_version }}"
+            )
+          fi
+          RESPONSE="$(curl -sS -w '\n%{http_code}' -X POST \
+            -H "Authorization: Bearer ${BEPLY_CI_TOKEN}" \
+            "${CURL_FIELDS[@]}" \
+            "${BEPLY_API_URL}/api/v1/plugins/release")"
+          HTTP_CODE="$(tail -1 <<<"${RESPONSE}")"
+          BODY="$(sed '$d' <<<"${RESPONSE}")"
+          test "${HTTP_CODE}" -ge 200 && test "${HTTP_CODE}" -lt 300 || { echo "::error::DEV upload failed with HTTP ${HTTP_CODE}"; exit 1; }
+          test "$(jq -r '.data.version // empty' <<<"${BODY}")" = "${PLUGIN_VERSION}" || { echo "::error::DEV version mismatch"; exit 1; }
+          test "$(jq -r '.data.releaseStatus // empty' <<<"${BODY}")" = "pending_review" || { echo "::error::DEV candidate is not pending_review"; exit 1; }
+          PLUGIN_ID="$(jq -r '.data.pluginId // empty' <<<"${BODY}")"
+          VERSION_ID="$(jq -r '.data.versionId // empty' <<<"${BODY}")"
+          test -n "${PLUGIN_ID}" && test -n "${VERSION_ID}" || { echo "::error::DEV candidate identity missing"; exit 1; }
+          EVIDENCE="$(jq -cn \
+            --arg schemaVersion 'beply.plugin.candidate.v1' \
+            --arg pluginName "${PLUGIN_NAME}" \
+            --arg version "${PLUGIN_VERSION}" \
+            --arg pluginId "${PLUGIN_ID}" \
+            --arg versionId "${VERSION_ID}" \
+            --arg checksum "${CHECKSUM}" \
+            --argjson fileSize "${FILE_SIZE}" \
+            --arg releaseTag "${GITHUB_REF_NAME}" \
+            --arg sourceSha "${GITHUB_SHA}" \
+            '{schemaVersion:$schemaVersion,pluginName:$pluginName,version:$version,pluginId:$pluginId,versionId:$versionId,checksum:$checksum,fileSize:$fileSize,releaseTag:$releaseTag,sourceSha:$sourceSha}')"
+          {
+            echo "plugin_id=${PLUGIN_ID}"
+            echo "version_id=${VERSION_ID}"
+            echo "candidate_evidence_json=${EVIDENCE}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "BEPLY_PLUGIN_CANDIDATE_EVIDENCE_JSON=${EVIDENCE}" | tee -a "${GITHUB_STEP_SUMMARY}"

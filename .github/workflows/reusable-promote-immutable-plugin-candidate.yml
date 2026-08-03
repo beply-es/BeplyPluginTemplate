@@ -1,0 +1,254 @@
+name: Reusable Promote Immutable Plugin Candidate
+
+on:
+  workflow_call:
+    inputs:
+      contract_sha:
+        required: true
+        type: string
+      release_tag:
+        required: true
+        type: string
+      expected_commit_sha:
+        required: true
+        type: string
+      expected_checksum:
+        required: true
+        type: string
+      expected_file_size:
+        required: true
+        type: string
+      dev_candidate_version_id:
+        required: true
+        type: string
+      dev_validation_repository:
+        required: true
+        type: string
+      dev_validation_run_id:
+        required: true
+        type: string
+      dev_validation_head_sha:
+        required: true
+        type: string
+      dev_validation_workflow_name:
+        required: true
+        type: string
+      prod_api_url:
+        required: false
+        default: https://api.beply.es
+        type: string
+      release_track:
+        required: false
+        default: main
+        type: string
+      prod_artifact_prefix:
+        required: false
+        default: plugins/prod
+        type: string
+      confirm:
+        required: true
+        type: string
+    secrets:
+      BEPLY_PLUGIN_TEMPLATE_READ_TOKEN:
+        required: true
+      BEPLY_PROMOTION_GITHUB_TOKEN:
+        required: true
+      BEPLY_PROD_CI_TOKEN:
+        required: true
+      BEPLY_PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY:
+        required: false
+      BEPLY_PLUGIN_ARTIFACT_SIGNATURE_KEY_ID:
+        required: false
+    outputs:
+      prod_plugin_id:
+        value: ${{ jobs.promote.outputs.prod_plugin_id }}
+      prod_version_id:
+        value: ${{ jobs.promote.outputs.prod_version_id }}
+      prod_candidate_evidence_json:
+        value: ${{ jobs.promote.outputs.prod_candidate_evidence_json }}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  promote:
+    name: Promote Exact DEV100 Bytes To PROD Pending Review
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      prod_plugin_id: ${{ steps.upload_prod.outputs.plugin_id }}
+      prod_version_id: ${{ steps.upload_prod.outputs.version_id }}
+      prod_candidate_evidence_json: ${{ steps.upload_prod.outputs.candidate_evidence_json }}
+    steps:
+      - name: Checkout caller plugin at immutable release tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.release_tag }}
+          path: plugin
+          fetch-depth: 0
+
+      - name: Checkout immutable promotion contract
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: beply-es/BeplyPluginTemplate
+          ref: ${{ inputs.contract_sha }}
+          path: contract
+          token: ${{ secrets.BEPLY_PLUGIN_TEMPLATE_READ_TOKEN }}
+
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "24"
+
+      - name: Parse and validate plugin identity
+        id: ini
+        working-directory: plugin
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          parse_field() {
+            grep -E "^$1\\s*=" facturascripts.ini | head -1 | sed 's/^[^=]*=[ ]*//' | tr -d '"\r' | xargs
+          }
+          NAME="$(parse_field name)"
+          VERSION="$(parse_field version)"
+          test "${RELEASE_TAG}" = "v${VERSION}" || { echo "::error::tag/version mismatch"; exit 1; }
+          {
+            echo "name=${NAME}"
+            echo "version=${VERSION}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Validate exact DEV100 run and machine-readable evidence
+        env:
+          GH_TOKEN: ${{ secrets.BEPLY_PROMOTION_GITHUB_TOKEN }}
+          CONTRACT_SHA: ${{ inputs.contract_sha }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          EXPECTED_COMMIT_SHA: ${{ inputs.expected_commit_sha }}
+          EXPECTED_CHECKSUM: ${{ inputs.expected_checksum }}
+          EXPECTED_FILE_SIZE: ${{ inputs.expected_file_size }}
+          DEV_CANDIDATE_VERSION_ID: ${{ inputs.dev_candidate_version_id }}
+          DEV_VALIDATION_REPOSITORY: ${{ inputs.dev_validation_repository }}
+          DEV_VALIDATION_RUN_ID: ${{ inputs.dev_validation_run_id }}
+          DEV_VALIDATION_HEAD_SHA: ${{ inputs.dev_validation_head_sha }}
+          DEV_VALIDATION_WORKFLOW_NAME: ${{ inputs.dev_validation_workflow_name }}
+          PLUGIN_NAME: ${{ steps.ini.outputs.name }}
+          PLUGIN_VERSION: ${{ steps.ini.outputs.version }}
+          PROMOTION_CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          test "${PROMOTION_CONFIRM}" = "PROMOTE_EXACT_DEV_VALIDATED_PLUGIN_TO_PROD" || { echo "::error::confirmation mismatch"; exit 1; }
+          test "$(git -C contract rev-parse HEAD)" = "${CONTRACT_SHA}" || { echo "::error::contract checkout mismatch"; exit 1; }
+          test "$(git -C plugin rev-list -n 1 "${RELEASE_TAG}")" = "${EXPECTED_COMMIT_SHA}" || { echo "::error::release tag source SHA mismatch"; exit 1; }
+          RUN_JSON="$(gh api "repos/${DEV_VALIDATION_REPOSITORY}/actions/runs/${DEV_VALIDATION_RUN_ID}")"
+          test "$(jq -r '.status' <<<"${RUN_JSON}")" = "completed" || { echo "::error::DEV100 run is not terminal"; exit 1; }
+          test "$(jq -r '.conclusion' <<<"${RUN_JSON}")" = "success" || { echo "::error::DEV100 run is not successful"; exit 1; }
+          test "$(jq -r '.name' <<<"${RUN_JSON}")" = "${DEV_VALIDATION_WORKFLOW_NAME}" || { echo "::error::DEV100 workflow mismatch"; exit 1; }
+          test "$(jq -r '.event' <<<"${RUN_JSON}")" = "workflow_dispatch" || { echo "::error::DEV100 event mismatch"; exit 1; }
+          test "$(jq -r '.head_sha' <<<"${RUN_JSON}")" = "${DEV_VALIDATION_HEAD_SHA}" || { echo "::error::DEV100 source SHA mismatch"; exit 1; }
+          gh run view "${DEV_VALIDATION_RUN_ID}" --repo "${DEV_VALIDATION_REPOSITORY}" --log > /tmp/plugin-dev100.log
+          python3 contract/scripts/ci/immutable_plugin_contract.py verify-dev100-log \
+            --log /tmp/plugin-dev100.log \
+            --plugin-name "${PLUGIN_NAME}" \
+            --plugin-version "${PLUGIN_VERSION}" \
+            --version-id "${DEV_CANDIDATE_VERSION_ID}" \
+            --checksum "${EXPECTED_CHECKSUM}" \
+            --file-size "${EXPECTED_FILE_SIZE}" \
+            --release-tag "${RELEASE_TAG}" \
+            --source-sha "${EXPECTED_COMMIT_SHA}" > /tmp/validated-dev100-evidence.json
+
+      - name: Download and verify immutable release asset without rebuilding
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          EXPECTED_CHECKSUM: ${{ inputs.expected_checksum }}
+          EXPECTED_FILE_SIZE: ${{ inputs.expected_file_size }}
+          ASSET_NAME: ${{ steps.ini.outputs.name }}-v${{ steps.ini.outputs.version }}.zip
+        run: |
+          set -euo pipefail
+          gh release download "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --pattern "${ASSET_NAME}" --dir /tmp
+          ZIP="/tmp/${ASSET_NAME}"
+          test "sha256:$(sha256sum "${ZIP}" | awk '{print $1}')" = "${EXPECTED_CHECKSUM}" || { echo "::error::immutable asset checksum mismatch"; exit 1; }
+          test "$(stat -c %s "${ZIP}")" = "${EXPECTED_FILE_SIZE}" || { echo "::error::immutable asset byte-size mismatch"; exit 1; }
+
+      - name: Generate PROD attestation from existing immutable bytes
+        id: attestation
+        env:
+          PLUGIN_NAME: ${{ steps.ini.outputs.name }}
+          PLUGIN_VERSION: ${{ steps.ini.outputs.version }}
+          PLUGIN_ZIP: /tmp/${{ steps.ini.outputs.name }}-v${{ steps.ini.outputs.version }}.zip
+          PLUGIN_RELEASE_TRACK: ${{ inputs.release_track }}
+          PLUGIN_ARTIFACT_PREFIX: ${{ inputs.prod_artifact_prefix }}
+          SOURCE_REPO_FULL_NAME: ${{ github.repository }}
+          SOURCE_RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_RELEASE_URL: https://github.com/${{ github.repository }}/releases/tag/${{ inputs.release_tag }}
+          SOURCE_SHA: ${{ inputs.expected_commit_sha }}
+          PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY: ${{ secrets.BEPLY_PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY }}
+          PLUGIN_ARTIFACT_SIGNATURE_KEY_ID: ${{ secrets.BEPLY_PLUGIN_ARTIFACT_SIGNATURE_KEY_ID }}
+        run: node contract/scripts/ci/build_plugin_artifact_attestation.mjs
+
+      - name: Upload exact DEV100 bytes to PROD pending canonical approval
+        id: upload_prod
+        env:
+          BEPLY_API_URL: ${{ inputs.prod_api_url }}
+          BEPLY_CI_TOKEN: ${{ secrets.BEPLY_PROD_CI_TOKEN }}
+          PLUGIN_NAME: ${{ steps.ini.outputs.name }}
+          PLUGIN_VERSION: ${{ steps.ini.outputs.version }}
+          CHECKSUM: ${{ inputs.expected_checksum }}
+          FILE_SIZE: ${{ inputs.expected_file_size }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_SHA: ${{ inputs.expected_commit_sha }}
+          RELEASE_TRACK: ${{ inputs.release_track }}
+          HAS_ATTESTATION: ${{ steps.attestation.outputs.has_attestation }}
+        run: |
+          set -euo pipefail
+          test -n "${BEPLY_CI_TOKEN}" || { echo "::error::BEPLY_PROD_CI_TOKEN is required"; exit 1; }
+          ZIP="/tmp/${PLUGIN_NAME}-v${PLUGIN_VERSION}.zip"
+          test "${{ steps.attestation.outputs.artifact_checksum }}" = "${CHECKSUM}" || { echo "::error::PROD attestation checksum drift"; exit 1; }
+          CURL_FIELDS=(
+            -F "file=@${ZIP}"
+            -F "sourceRepoFullName=${GITHUB_REPOSITORY}"
+            -F "sourceBranch=${RELEASE_TRACK}"
+            -F "sourceReleaseTag=${RELEASE_TAG}"
+            -F "sourceReleaseUrl=https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
+            -F "sourcePublishedAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          )
+          if [ "${HAS_ATTESTATION}" = "true" ]; then
+            CURL_FIELDS+=(
+              -F "artifactSignature=${{ steps.attestation.outputs.artifact_signature }}"
+              -F "artifactSignatureKeyId=${{ steps.attestation.outputs.artifact_signature_key_id }}"
+              -F "sbomUrl=${{ steps.attestation.outputs.sbom_url }}"
+              -F "sbomChecksum=${{ steps.attestation.outputs.sbom_checksum }}"
+              -F "artifactPolicyVersion=${{ steps.attestation.outputs.artifact_policy_version }}"
+            )
+          fi
+          RESPONSE="$(curl -sS -w '\n%{http_code}' -X POST \
+            -H "Authorization: Bearer ${BEPLY_CI_TOKEN}" \
+            "${CURL_FIELDS[@]}" \
+            "${BEPLY_API_URL}/api/v1/plugins/release")"
+          HTTP_CODE="$(tail -1 <<<"${RESPONSE}")"
+          BODY="$(sed '$d' <<<"${RESPONSE}")"
+          test "${HTTP_CODE}" -ge 200 && test "${HTTP_CODE}" -lt 300 || { echo "::error::PROD upload failed with HTTP ${HTTP_CODE}"; exit 1; }
+          test "$(jq -r '.data.version // empty' <<<"${BODY}")" = "${PLUGIN_VERSION}" || { echo "::error::PROD version mismatch"; exit 1; }
+          test "$(jq -r '.data.releaseStatus // empty' <<<"${BODY}")" = "pending_review" || { echo "::error::PROD candidate is not pending_review"; exit 1; }
+          PLUGIN_ID="$(jq -r '.data.pluginId // empty' <<<"${BODY}")"
+          VERSION_ID="$(jq -r '.data.versionId // empty' <<<"${BODY}")"
+          test -n "${PLUGIN_ID}" && test -n "${VERSION_ID}" || { echo "::error::PROD candidate identity missing"; exit 1; }
+          EVIDENCE="$(jq -cn \
+            --arg schemaVersion 'beply.plugin.prod-candidate.v1' \
+            --arg pluginName "${PLUGIN_NAME}" \
+            --arg version "${PLUGIN_VERSION}" \
+            --arg pluginId "${PLUGIN_ID}" \
+            --arg versionId "${VERSION_ID}" \
+            --arg checksum "${CHECKSUM}" \
+            --argjson fileSize "${FILE_SIZE}" \
+            --arg releaseTag "${RELEASE_TAG}" \
+            --arg sourceSha "${SOURCE_SHA}" \
+            '{schemaVersion:$schemaVersion,pluginName:$pluginName,version:$version,pluginId:$pluginId,versionId:$versionId,checksum:$checksum,fileSize:$fileSize,releaseTag:$releaseTag,sourceSha:$sourceSha}')"
+          {
+            echo "plugin_id=${PLUGIN_ID}"
+            echo "version_id=${VERSION_ID}"
+            echo "candidate_evidence_json=${EVIDENCE}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "BEPLY_PLUGIN_PROD_CANDIDATE_EVIDENCE_JSON=${EVIDENCE}" | tee -a "${GITHUB_STEP_SUMMARY}"

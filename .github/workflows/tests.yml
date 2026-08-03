@@ -46,6 +46,9 @@ jobs:
       - name: Validate release workflow model
         run: node scripts/ci/validate-release-model.mjs
 
+      - name: Unit test immutable plugin artifact contract
+        run: python3 -m unittest scripts/ci/test_immutable_plugin_contract.py
+
       - name: Validate documentation impact
         run: node scripts/ci/validate-docs-impact.mjs
 
