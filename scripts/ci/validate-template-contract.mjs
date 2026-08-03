@@ -177,8 +177,12 @@ for (const surface of coverage.surfaces || []) {
 }
 
 const releaseWorkflow = readFileSync(resolve(root, '.github/workflows/release.yml'), 'utf8')
+const testsWorkflow = readFileSync(resolve(root, '.github/workflows/tests.yml'), 'utf8')
 if (/paths-ignore:/.test(releaseWorkflow)) {
   fail('Release workflow must not ignore docs/tests paths; docs are part of the release contract')
+}
+if (isTemplate && !testsWorkflow.includes("vars.BEPLY_GHA_RUNNER || 'ubuntu-24.04'")) {
+  fail('Public template CI must retain a GitHub-hosted runner fallback')
 }
 
 if (errors.length > 0) {
