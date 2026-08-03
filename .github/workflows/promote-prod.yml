@@ -1,0 +1,60 @@
+name: Promote Immutable Plugin Candidate To PROD
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        required: true
+        type: string
+      expected_commit_sha:
+        required: true
+        type: string
+      expected_checksum:
+        required: true
+        type: string
+      expected_file_size:
+        required: true
+        type: string
+      dev_candidate_version_id:
+        required: true
+        type: string
+      dev_validation_repository:
+        required: true
+        type: string
+      dev_validation_run_id:
+        required: true
+        type: string
+      dev_validation_head_sha:
+        required: true
+        type: string
+      dev_validation_workflow_name:
+        required: true
+        type: string
+      confirm:
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  promote:
+    uses: ./.github/workflows/reusable-promote-immutable-plugin-candidate.yml
+    with:
+      contract_sha: ${{ github.sha }}
+      release_tag: ${{ inputs.release_tag }}
+      expected_commit_sha: ${{ inputs.expected_commit_sha }}
+      expected_checksum: ${{ inputs.expected_checksum }}
+      expected_file_size: ${{ inputs.expected_file_size }}
+      dev_candidate_version_id: ${{ inputs.dev_candidate_version_id }}
+      dev_validation_repository: ${{ inputs.dev_validation_repository }}
+      dev_validation_run_id: ${{ inputs.dev_validation_run_id }}
+      dev_validation_head_sha: ${{ inputs.dev_validation_head_sha }}
+      dev_validation_workflow_name: ${{ inputs.dev_validation_workflow_name }}
+      confirm: ${{ inputs.confirm }}
+    secrets:
+      BEPLY_PROMOTION_GITHUB_TOKEN: ${{ secrets.BEPLY_PROMOTION_GITHUB_TOKEN }}
+      BEPLY_PROD_CI_TOKEN: ${{ secrets.BEPLY_PROD_CI_TOKEN }}
+      BEPLY_PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY: ${{ secrets.BEPLY_PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY }}
+      BEPLY_PLUGIN_ARTIFACT_SIGNATURE_KEY_ID: ${{ secrets.BEPLY_PLUGIN_ARTIFACT_SIGNATURE_KEY_ID }}

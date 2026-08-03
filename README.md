@@ -1,6 +1,6 @@
 # BeplyPluginTemplate
 
-Plantilla base para arrancar un plugin Beply de FacturaScripts con workflow Codex, testing multiversion, documentacion de usuario/base, contrato de tools IA y CI/CD listo para publicar candidatos `dev` y releases `prod`.
+Plantilla base para arrancar un plugin Beply de FacturaScripts con workflow Codex, testing multiversion, documentacion de usuario/base, contrato de tools IA y promocion inmutable DEV100 a PROD.
 
 ## Estado y compatibilidad
 
@@ -26,7 +26,8 @@ Plantilla base para arrancar un plugin Beply de FacturaScripts con workflow Code
 - Incluye `Tools/manifest.json` y provider compatible con `BeplyAgents`.
 - Incluye flujo clean-room para ROM copy visual sin copiar codigo del original.
 - Incluye lock y sync controlado de plantilla para actualizar tooling comun sin pisar producto.
-- Incluye `Release Plugin` con gate sobre `Tests`, candidato `dev` desde la rama operativa y `prod` solo desde tags `v*`.
+- Incluye un contrato reutilizable que construye una sola vez desde `vX.Y`, publica el asset inmutable y valida esos mismos bytes en DEV.
+- Incluye una promocion PROD que exige evidencia DEV100 exacta y reutiliza el asset sin rebuild.
 - Sirve como base para documentar compatibilidad, capacidades, tools y contrato de release de nuevos plugins Beply.
 
 ## CI/CD
@@ -35,11 +36,11 @@ Plantilla base para arrancar un plugin Beply de FacturaScripts con workflow Code
 | --- | --- | --- |
 | `push` a cualquier rama | `Tests` | Valida contrato, docs, PHP 8.4, lint, unit, runtime y E2E contra la matriz FacturaScripts. |
 | `pull_request` | `Tests` | Valida el cambio sin publicar artefactos. |
-| `main` | `Release Plugin` | Si `Tests` pasa, audita docs y sube candidato `dev`. |
-| `tag vX.Y` | `Tests` + `Release Plugin` | Exige auditoria IA de docs, genera release de prod y sube el ZIP con `BEPLY_CI_TOKEN`. |
-| `workflow_dispatch` | `Release Plugin` | Permite reintentar la publicacion sobre un SHA ya validado. |
+| `main` | `Tests` | Valida codigo y contratos; no publica candidatos. |
+| `tag vX.Y` | `Tests` + `Release Plugin` | Construye un unico ZIP, crea el GitHub Release y sube exactamente esos bytes a DEV como `pending_review`. |
+| `workflow_dispatch` | `Promote Immutable Plugin To PROD` | Tras DEV100, verifica UUID, SHA-256, bytes, tag, source SHA y run; descarga el mismo asset y lo sube a PROD como `pending_review`. |
 
-Nota: el candidato `dev` usa `BEPLY_DEV_CI_TOKEN`. Si el secreto no existe, la subida `dev` se omite con aviso y no bloquea el workflow.
+Las credenciales son fail-closed: un secreto ausente falla el efecto dependiente. Ningun workflow convierte `latest`, `pending_review`, CI verde o un upload correcto en DEV100/PROD100.
 
 ## Uso recomendado
 
@@ -48,7 +49,7 @@ Nota: el candidato `dev` usa `BEPLY_DEV_CI_TOKEN`. Si el secreto no existe, la s
 3. Sustituir el smoke por tests reales unit/runtime/E2E.
 4. Completar `docs/user/`, `docs/docs-sync/impact-map.json` y `docs/testing/ui-coverage-matrix.json`.
 5. Declarar tools IA en `Tools/manifest.json` si el plugin modifica el chat/agente.
-6. Revisar si el repo debe publicar desde `main` o declarar `BEPLY_RELEASE_BRANCH`.
+6. Migrar los adapters de release con un `uses:` fijado al SHA exacto revisado de esta plantilla; no copiar la implementacion al plugin.
 
 ## Actualizacion desde plantilla
 
@@ -60,7 +61,9 @@ node scripts/template/sync-template.mjs --ref v1.4
 node scripts/template/sync-template.mjs --ref v1.4 --apply
 ```
 
-El sync actualiza CI, scripts, docs de proceso y contratos comunes. No pisa
+El sync actualiza CI, scripts, docs de proceso y contratos comunes. Los adapters
+`release.yml` y `promote-prod.yml` solo se crean si faltan: una migracion nunca
+sobrescribe la politica de release existente. Tampoco pisa
 codigo del plugin, documentacion de usuario, `Tools/manifest.json`, matriz de
 cobertura ni impact-map reales del plugin.
 

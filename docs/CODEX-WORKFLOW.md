@@ -38,12 +38,17 @@ Orden minimo:
 6. Playwright E2E con datos seed, limpieza y evidencias.
 7. Auditoria IA de documentacion en tags de release.
 
-## 5. Release
+## 5. Release y promocion
 
-- `main` publica candidato `dev`.
-- `vX.Y` publica candidato `prod`.
-- El tag debe coincidir con `facturascripts.ini`.
-- El release falla si los tests, docs, tools o version matrix no cumplen contrato.
+- `main` valida y no publica candidatos.
+- `vX.Y` construye una vez y publica el mismo asset en GitHub Release y DEV.
+- El tag debe coincidir con `facturascripts.ini` y resolver al source SHA declarado.
+- La validacion DEV debe emitir un unico registro machine-readable con UUID,
+  SHA-256, bytes, tag y source SHA exactos.
+- PROD descarga ese mismo asset despues de DEV100; nunca reconstruye.
+- Los plugins consumen workflows reutilizables fijados a un SHA exacto del
+  template y conservan solo adapters/validaciones propias inevitables.
+- CI, upload, attestation o `pending_review` no equivalen a DEV100/PROD100.
 
 ## 6. Sync de plantilla
 
