@@ -27,6 +27,17 @@ EXPECTED = {
     "sourceSha": "b" * 40,
 }
 
+EXPECTED_CALENDAR = {
+    **EXPECTED,
+    "pluginName": "CalendarioCitas",
+    "version": "7.1",
+    "versionId": "22222222-2222-4222-8222-222222222222",
+    "checksum": "sha256:" + ("c" * 64),
+    "fileSize": 1206000,
+    "releaseTag": "v7.1",
+    "sourceSha": "d" * 40,
+}
+
 
 class ImmutableIdentityTests(unittest.TestCase):
     def test_accepts_exact_canonical_identity(self) -> None:
@@ -79,6 +90,64 @@ class ImmutableIdentityTests(unittest.TestCase):
         for name, log in cases.items():
             with self.subTest(name=name), self.assertRaises(ContractError):
                 parse_dev100_evidence_log(log, EXPECTED)
+
+    def test_opt_in_selects_one_exact_plugin_from_a_multi_plugin_fullset_log(self) -> None:
+        crm = json.dumps(EXPECTED, separators=(",", ":"), sort_keys=True)
+        calendar = json.dumps(
+            EXPECTED_CALENDAR,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        log = (
+            f"BEPLY_PLUGIN_DEV100_EVIDENCE_JSON={crm}\n"
+            f"BEPLY_PLUGIN_DEV100_EVIDENCE_JSON={calendar}\n"
+        )
+
+        with self.assertRaisesRegex(ContractError, "exactly one"):
+            parse_dev100_evidence_log(log, EXPECTED_CALENDAR)
+        self.assertEqual(
+            parse_dev100_evidence_log(
+                log,
+                EXPECTED_CALENDAR,
+                allow_other_plugin_records=True,
+            ),
+            EXPECTED_CALENDAR,
+        )
+
+    def test_multi_plugin_opt_in_rejects_duplicate_target_or_invalid_peer(self) -> None:
+        calendar = json.dumps(
+            EXPECTED_CALENDAR,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        duplicate = (
+            f"BEPLY_PLUGIN_DEV100_EVIDENCE_JSON={calendar}\n"
+            f"BEPLY_PLUGIN_DEV100_EVIDENCE_JSON={calendar}\n"
+        )
+        invalid_peer = json.dumps({**EXPECTED, "unsafe": "value"})
+
+        for log in (
+            duplicate,
+            f"BEPLY_PLUGIN_DEV100_EVIDENCE_JSON={invalid_peer}\n"
+            f"BEPLY_PLUGIN_DEV100_EVIDENCE_JSON={calendar}\n",
+        ):
+            with self.subTest(log=log), self.assertRaises(ContractError):
+                parse_dev100_evidence_log(
+                    log,
+                    EXPECTED_CALENDAR,
+                    allow_other_plugin_records=True,
+                )
+
+    def test_reusable_promotion_exposes_fail_closed_multi_plugin_opt_in(self) -> None:
+        workflow = (
+            Path(__file__).resolve().parents[2]
+            / ".github/workflows/reusable-promote-immutable-plugin-candidate.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("allow_other_plugin_evidence:", workflow)
+        self.assertIn("default: false", workflow)
+        self.assertIn("ALLOW_OTHER_PLUGIN_EVIDENCE", workflow)
+        self.assertIn("--allow-other-plugin-records", workflow)
 
 
 class DeterministicPluginZipTests(unittest.TestCase):

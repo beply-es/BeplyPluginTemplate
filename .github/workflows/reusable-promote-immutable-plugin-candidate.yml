@@ -33,6 +33,10 @@ on:
       dev_validation_workflow_name:
         required: true
         type: string
+      allow_other_plugin_evidence:
+        required: false
+        default: false
+        type: boolean
       prod_api_url:
         required: false
         default: https://api.beply.es
@@ -133,6 +137,7 @@ jobs:
           PLUGIN_NAME: ${{ steps.ini.outputs.name }}
           PLUGIN_VERSION: ${{ steps.ini.outputs.version }}
           PROMOTION_CONFIRM: ${{ inputs.confirm }}
+          ALLOW_OTHER_PLUGIN_EVIDENCE: ${{ inputs.allow_other_plugin_evidence }}
         run: |
           set -euo pipefail
           test "${PROMOTION_CONFIRM}" = "PROMOTE_EXACT_DEV_VALIDATED_PLUGIN_TO_PROD" || { echo "::error::confirmation mismatch"; exit 1; }
@@ -145,6 +150,10 @@ jobs:
           test "$(jq -r '.event' <<<"${RUN_JSON}")" = "workflow_dispatch" || { echo "::error::DEV100 event mismatch"; exit 1; }
           test "$(jq -r '.head_sha' <<<"${RUN_JSON}")" = "${DEV_VALIDATION_HEAD_SHA}" || { echo "::error::DEV100 source SHA mismatch"; exit 1; }
           gh run view "${DEV_VALIDATION_RUN_ID}" --repo "${DEV_VALIDATION_REPOSITORY}" --log > /tmp/plugin-dev100.log
+          EVIDENCE_ARGS=()
+          if [ "${ALLOW_OTHER_PLUGIN_EVIDENCE}" = "true" ]; then
+            EVIDENCE_ARGS+=(--allow-other-plugin-records)
+          fi
           python3 contract/scripts/ci/immutable_plugin_contract.py verify-dev100-log \
             --log /tmp/plugin-dev100.log \
             --plugin-name "${PLUGIN_NAME}" \
@@ -153,7 +162,8 @@ jobs:
             --checksum "${EXPECTED_CHECKSUM}" \
             --file-size "${EXPECTED_FILE_SIZE}" \
             --release-tag "${RELEASE_TAG}" \
-            --source-sha "${EXPECTED_COMMIT_SHA}" > /tmp/validated-dev100-evidence.json
+            --source-sha "${EXPECTED_COMMIT_SHA}" \
+            "${EVIDENCE_ARGS[@]}" > /tmp/validated-dev100-evidence.json
 
       - name: Download and verify immutable release asset without rebuilding
         env:
