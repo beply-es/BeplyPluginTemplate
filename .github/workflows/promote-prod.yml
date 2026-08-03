@@ -54,7 +54,6 @@ jobs:
       dev_validation_workflow_name: ${{ inputs.dev_validation_workflow_name }}
       confirm: ${{ inputs.confirm }}
     secrets:
-      BEPLY_PLUGIN_TEMPLATE_READ_TOKEN: ${{ github.token }}
       BEPLY_PROMOTION_GITHUB_TOKEN: ${{ secrets.BEPLY_PROMOTION_GITHUB_TOKEN }}
       BEPLY_PROD_CI_TOKEN: ${{ secrets.BEPLY_PROD_CI_TOKEN }}
       BEPLY_PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY: ${{ secrets.BEPLY_PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY }}

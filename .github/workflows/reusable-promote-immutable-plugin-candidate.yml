@@ -49,8 +49,6 @@ on:
         required: true
         type: string
     secrets:
-      BEPLY_PLUGIN_TEMPLATE_READ_TOKEN:
-        required: true
       BEPLY_PROMOTION_GITHUB_TOKEN:
         required: true
       BEPLY_PROD_CI_TOKEN:
@@ -96,7 +94,6 @@ jobs:
           repository: beply-es/BeplyPluginTemplate
           ref: ${{ inputs.contract_sha }}
           path: contract
-          token: ${{ secrets.BEPLY_PLUGIN_TEMPLATE_READ_TOKEN }}
 
       - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:

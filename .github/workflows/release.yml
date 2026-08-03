@@ -108,7 +108,6 @@ jobs:
       contract_sha: ${{ github.sha }}
       release_track: main
     secrets:
-      BEPLY_PLUGIN_TEMPLATE_READ_TOKEN: ${{ github.token }}
       BEPLY_DEV_CI_TOKEN: ${{ secrets.BEPLY_DEV_CI_TOKEN }}
       BEPLY_DEV_PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY: ${{ secrets.BEPLY_DEV_PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY }}
       BEPLY_DEV_PLUGIN_ARTIFACT_SIGNATURE_KEY_ID: ${{ secrets.BEPLY_DEV_PLUGIN_ARTIFACT_SIGNATURE_KEY_ID }}

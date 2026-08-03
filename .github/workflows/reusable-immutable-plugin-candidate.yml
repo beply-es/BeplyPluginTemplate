@@ -23,8 +23,6 @@ on:
         default: plugins/dev
         type: string
     secrets:
-      BEPLY_PLUGIN_TEMPLATE_READ_TOKEN:
-        required: true
       BEPLY_DEV_CI_TOKEN:
         required: true
       BEPLY_DEV_PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY:
@@ -84,7 +82,6 @@ jobs:
           repository: beply-es/BeplyPluginTemplate
           ref: ${{ inputs.contract_sha }}
           path: contract
-          token: ${{ secrets.BEPLY_PLUGIN_TEMPLATE_READ_TOKEN }}
 
       - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:

@@ -13,7 +13,6 @@
 
 | Secret | Uso |
 | --- | --- |
-| `BEPLY_PLUGIN_TEMPLATE_READ_TOKEN` | Checkout read-only del SHA exacto del contrato cuando el template es privado |
 | `BEPLY_DEV_CI_TOKEN` | Subida de candidato dev |
 | `BEPLY_PROMOTION_GITHUB_TOKEN` | Lectura del run/log DEV100 exacto |
 | `BEPLY_PROD_CI_TOKEN` | Subida del mismo asset a PROD |
@@ -92,8 +91,11 @@ jobs:
     uses: beply-es/BeplyPluginTemplate/.github/workflows/reusable-immutable-plugin-candidate.yml@0123456789abcdef0123456789abcdef01234567
     with:
       contract_sha: 0123456789abcdef0123456789abcdef01234567
-    secrets:
-      BEPLY_PLUGIN_TEMPLATE_READ_TOKEN: ${{ secrets.BEPLY_PLUGIN_TEMPLATE_READ_TOKEN }}
 ```
 
-La promocion usa el workflow reutilizable equivalente con el mismo SHA. No se copia packaging, transporte, parsing de evidencia ni logica de promocion al repositorio consumidor. Las validaciones inevitables del producto permanecen en su adapter y su E2E.
+La promocion usa el workflow reutilizable equivalente con el mismo SHA. El
+template es publico y no requiere un secreto de checkout; los tokens de
+catalogo y de lectura de evidencia privada siguen siendo obligatorios y
+fail-closed. No se copia packaging, transporte, parsing de evidencia ni logica
+de promocion al repositorio consumidor. Las validaciones inevitables del
+producto permanecen en su adapter y su E2E.
