@@ -70,6 +70,8 @@ El registro DEV100 canonico contiene solo identidad tecnica no sensible:
 ```
 
 Campos extra, registros duplicados, UUID no canonico, `latest`, SHA abreviado o bytes no positivos fallan cerrados.
+El productor debe ensamblar el nombre del marcador en runtime para que la línea
+de código que Actions imprime no simule un segundo registro.
 
 ## Plataforma
 

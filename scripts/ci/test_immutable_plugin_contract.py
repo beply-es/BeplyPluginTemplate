@@ -53,6 +53,16 @@ class ImmutableIdentityTests(unittest.TestCase):
 
         self.assertEqual(parse_dev100_evidence_log(log, EXPECTED), EXPECTED)
 
+    def test_ignores_unexpanded_actions_script_source_before_runtime_record(self) -> None:
+        record = json.dumps(EXPECTED, separators=(",", ":"), sort_keys=True)
+        log = (
+            "job\tstep\tMARKER_NAME='BEPLY_PLUGIN_DEV100_EVIDENCE_JSON'\n"
+            "job\tstep\tprintf '%s=%s\\n' \"${MARKER_NAME}\" \"${EVIDENCE}\"\n"
+            f"job\tstep\tBEPLY_PLUGIN_DEV100_EVIDENCE_JSON={record}\n"
+        )
+
+        self.assertEqual(parse_dev100_evidence_log(log, EXPECTED), EXPECTED)
+
     def test_rejects_missing_duplicate_extra_or_drifted_dev100_records(self) -> None:
         canonical = json.dumps(EXPECTED, separators=(",", ":"), sort_keys=True)
         cases = {
