@@ -45,6 +45,9 @@ Orden minimo:
 - El tag debe coincidir con `facturascripts.ini` y resolver al source SHA declarado.
 - La validacion DEV debe emitir un unico registro machine-readable con UUID,
   SHA-256, bytes, tag y source SHA exactos.
+- Un Full-Set multi-plugin puede emitir varios registros solo con el opt-in del
+  workflow reutilizable: todos deben ser canonicos y debe existir exactamente
+  uno para el plugin que se promueve.
 - PROD descarga ese mismo asset despues de DEV100; nunca reconstruye.
 - Los plugins consumen workflows reutilizables fijados a un SHA exacto del
   template y conservan solo adapters/validaciones propias inevitables.

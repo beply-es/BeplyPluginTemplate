@@ -28,6 +28,7 @@ Plantilla base para arrancar un plugin Beply de FacturaScripts con workflow Code
 - Incluye lock y sync controlado de plantilla para actualizar tooling comun sin pisar producto.
 - Incluye un contrato reutilizable que construye una sola vez desde `vX.Y`, publica el asset inmutable y valida esos mismos bytes en DEV.
 - Incluye una promocion PROD que exige evidencia DEV100 exacta y reutiliza el asset sin rebuild.
+- Permite que un unico Full-Set emita evidencia canonica de varios plugins mediante un opt-in fail-closed: valida todos los registros y selecciona exactamente uno del plugin promovido.
 - Sirve como base para documentar compatibilidad, capacidades, tools y contrato de release de nuevos plugins Beply.
 
 ## CI/CD

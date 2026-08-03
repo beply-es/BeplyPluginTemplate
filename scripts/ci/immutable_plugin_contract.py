@@ -66,6 +66,8 @@ def validate_immutable_identity(raw: Mapping[str, Any]) -> dict[str, Any]:
 def parse_dev100_evidence_log(
     log_text: str,
     expected: Mapping[str, Any],
+    *,
+    allow_other_plugin_records: bool = False,
 ) -> dict[str, Any]:
     records: list[dict[str, Any]] = []
     for line in log_text.splitlines():
@@ -80,12 +82,25 @@ def parse_dev100_evidence_log(
         if not isinstance(payload, dict):
             raise ContractError("DEV100 evidence payload is not an object")
         records.append(validate_immutable_identity(payload))
-    if len(records) != 1:
-        raise ContractError("exactly one DEV100 evidence record is required")
     canonical_expected = validate_immutable_identity(expected)
-    if records[0] != canonical_expected:
+    if allow_other_plugin_records:
+        matching_records = [
+            record
+            for record in records
+            if record["pluginName"] == canonical_expected["pluginName"]
+        ]
+        if len(matching_records) != 1:
+            raise ContractError(
+                "exactly one DEV100 evidence record for the expected plugin is required"
+            )
+        selected = matching_records[0]
+    else:
+        if len(records) != 1:
+            raise ContractError("exactly one DEV100 evidence record is required")
+        selected = records[0]
+    if selected != canonical_expected:
         raise ContractError("DEV100 evidence identity drift")
-    return records[0]
+    return selected
 
 
 def expected_from_args(args: argparse.Namespace) -> dict[str, Any]:
@@ -113,12 +128,14 @@ def main() -> int:
     verify.add_argument("--file-size", required=True, type=int)
     verify.add_argument("--release-tag", required=True)
     verify.add_argument("--source-sha", required=True)
+    verify.add_argument("--allow-other-plugin-records", action="store_true")
     args = parser.parse_args()
     if args.command == "verify-dev100-log":
         try:
             evidence = parse_dev100_evidence_log(
                 args.log.read_text(encoding="utf-8"),
                 expected_from_args(args),
+                allow_other_plugin_records=args.allow_other_plugin_records,
             )
         except (OSError, ContractError) as exc:
             parser.error(str(exc))

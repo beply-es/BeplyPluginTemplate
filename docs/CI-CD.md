@@ -73,6 +73,13 @@ Campos extra, registros duplicados, UUID no canonico, `latest`, SHA abreviado o 
 El productor debe ensamblar el nombre del marcador en runtime para que la línea
 de código que Actions imprime no simule un segundo registro.
 
+Por defecto, la promocion conserva el contrato de un solo registro global. Un
+Full-Set que valide varios plugins puede activar `allow_other_plugin_evidence`:
+el parser valida de forma canonica todos los registros, exige exactamente uno
+para el `pluginName` promovido y rechaza peers invalidos o duplicados del
+objetivo. El opt-in no relaja la identidad inmutable ni permite seleccionar por
+`latest`, version parcial o posicion en el log.
+
 ## Plataforma
 
 La API de release es:
