@@ -110,7 +110,7 @@ class DeterministicPluginZipTests(unittest.TestCase):
                     ["BeplyDemo/Init.php", "BeplyDemo/facturascripts.ini"],
                 )
 
-    def test_attestation_binds_existing_bytes_and_source_sha_without_rebuild(self) -> None:
+    def test_attestation_matches_backend_canonical_sbom_without_rebuild(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "plugin"
             root.mkdir()
@@ -157,7 +157,16 @@ class DeterministicPluginZipTests(unittest.TestCase):
                 item["name"]: item["value"]
                 for item in sbom["metadata"]["component"]["properties"]
             }
-            self.assertEqual(properties["beply:sourceSha"], "b" * 40)
+            self.assertEqual(
+                properties,
+                {
+                    "beply:releaseTrack": "main",
+                    "beply:artifactKey": "plugins/dev/beplydemo/1.2/plugin.zip",
+                    "beply:fileSize": str(built["fileSize"]),
+                    "beply:sourceRepoFullName": "beply-es/BeplyDemo",
+                    "beply:sourceReleaseTag": "v1.2",
+                },
+            )
 
     def test_rejects_symlinked_payload_entries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -57,7 +57,6 @@ function buildSbom(input) {
     { name: 'beply:releaseTrack', value: input.releaseTrack },
     { name: 'beply:artifactKey', value: input.artifactKey },
     { name: 'beply:fileSize', value: String(input.fileSize) },
-    { name: 'beply:sourceSha', value: input.sourceSha },
   ]
   if (input.sourceRepoFullName) {
     properties.push({ name: 'beply:sourceRepoFullName', value: input.sourceRepoFullName })
