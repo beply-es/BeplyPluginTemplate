@@ -1,5 +1,7 @@
 vendor/
 node_modules/
+__pycache__/
+*.pyc
 coverage.xml
 coverage-report.txt
 coverage-html/
