@@ -138,7 +138,6 @@ function buildSbom(input) {
     { name: 'beply:releaseTrack', value: input.releaseTrack },
     { name: 'beply:artifactKey', value: input.artifactKey },
     { name: 'beply:fileSize', value: String(input.fileSize) },
-    { name: 'beply:sourceSha', value: input.sourceSha },
     ...input.lockHashes,
   ]
   if (input.sourceRepoFullName) {
@@ -231,7 +230,6 @@ const sbom = buildSbom({
   sourceRepoFullName,
   sourceReleaseTag,
   sourceReleaseUrl,
-  sourceSha,
   ...dependencies,
 })
 const sbomChecksum = sha256(sbom)

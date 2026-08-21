@@ -271,7 +271,6 @@ class DeterministicPluginZipTests(unittest.TestCase):
                     "beply:releaseTrack": "main",
                     "beply:artifactKey": "plugins/dev/beplydemo/1.2/plugin.zip",
                     "beply:fileSize": str(built["fileSize"]),
-                    "beply:sourceSha": "b" * 40,
                     "beply:composerLockSha256": self._sha256(root / "composer.lock"),
                     "beply:npmLockSha256": self._sha256(root / "tests" / "package-lock.json"),
                     "beply:sourceRepoFullName": "beply-es/BeplyDemo",
