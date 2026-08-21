@@ -89,9 +89,11 @@ def build_plugin_zip(
     payload: list[tuple[Path, Path]] = []
     for path in sorted(plugin_root.rglob("*"), key=lambda item: item.as_posix()):
         relative = path.relative_to(plugin_root)
+        if is_excluded(relative):
+            continue
         if path.is_symlink():
             raise BuildError(f"symlinked payload entry is forbidden: {relative}")
-        if is_excluded(relative) or not path.is_file():
+        if not path.is_file():
             continue
         payload.append((relative, path))
 

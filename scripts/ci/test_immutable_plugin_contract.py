@@ -368,6 +368,27 @@ class DeterministicPluginZipTests(unittest.TestCase):
                     "1.2",
                 )
 
+    def test_ignores_symlinks_inside_excluded_tooling_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "plugin"
+            root.mkdir()
+            (root / "facturascripts.ini").write_text(
+                "name = BeplyDemo\nversion = 1.2\n",
+                encoding="utf-8",
+            )
+            (root / "tests").mkdir()
+            (root / "tests" / "node_modules").mkdir()
+            (root / "tests" / "node_modules" / "tool").symlink_to(Path(tmp) / "missing")
+
+            built = build_plugin_zip(
+                root,
+                Path(tmp) / "candidate.zip",
+                "BeplyDemo",
+                "1.2",
+            )
+
+            self.assertGreater(built["fileSize"], 0)
+
 
 class ReleaseAdapterMigrationTests(unittest.TestCase):
     def _run_validator(self, root: Path) -> subprocess.CompletedProcess[str]:
