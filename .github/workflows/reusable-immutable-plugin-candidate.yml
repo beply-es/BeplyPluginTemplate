@@ -210,6 +210,7 @@ jobs:
           PLUGIN_NAME: ${{ steps.ini.outputs.name }}
           PLUGIN_VERSION: ${{ steps.ini.outputs.version }}
           PLUGIN_ZIP: /tmp/${{ steps.ini.outputs.name }}-v${{ steps.ini.outputs.version }}.zip
+          PLUGIN_ROOT: plugin
           PLUGIN_RELEASE_TRACK: ${{ inputs.release_track }}
           PLUGIN_ARTIFACT_PREFIX: ${{ inputs.dev_artifact_prefix }}
           SOURCE_REPO_FULL_NAME: ${{ github.repository }}

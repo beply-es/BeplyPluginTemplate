@@ -38,6 +38,11 @@ EXCLUDED_NAMES = {
 PLUGIN_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*$")
 PLUGIN_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+$")
 FIXED_ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
+SUPPLY_CHAIN_LOCKS = (
+    (Path("composer.lock"), Path(".beply/supply-chain/composer.lock")),
+    (Path("package-lock.json"), Path(".beply/supply-chain/package-lock.json")),
+    (Path("tests/package-lock.json"), Path(".beply/supply-chain/package-lock.json")),
+)
 
 
 class BuildError(RuntimeError):
@@ -89,6 +94,17 @@ def build_plugin_zip(
         if is_excluded(relative) or not path.is_file():
             continue
         payload.append((relative, path))
+
+    embedded_locks: dict[Path, Path] = {}
+    for source_relative, archive_relative in SUPPLY_CHAIN_LOCKS:
+        source = plugin_root / source_relative
+        if source.is_symlink():
+            raise BuildError(f"symlinked supply-chain lock is forbidden: {source_relative}")
+        if source.is_file():
+            embedded_locks.setdefault(archive_relative, source)
+    payload = [(relative, path) for relative, path in payload if relative not in embedded_locks]
+    payload.extend(sorted(embedded_locks.items(), key=lambda item: item[0].as_posix()))
+    payload.sort(key=lambda item: item[0].as_posix())
     if not payload:
         raise BuildError("plugin payload is empty")
 

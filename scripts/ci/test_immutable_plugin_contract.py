@@ -151,6 +151,27 @@ class ImmutableIdentityTests(unittest.TestCase):
 
 
 class DeterministicPluginZipTests(unittest.TestCase):
+    def test_prod_workflow_requires_signature_and_reconstructable_sbom(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        candidate = (root / ".github/workflows/reusable-immutable-plugin-candidate.yml").read_text(
+            encoding="utf-8"
+        )
+        promotion = (
+            root / ".github/workflows/reusable-promote-immutable-plugin-candidate.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("PLUGIN_ROOT: plugin", candidate)
+        self.assertIn("PLUGIN_ROOT: plugin", promotion)
+        self.assertIn('REQUIRE_ARTIFACT_SIGNATURE: "true"', promotion)
+        self.assertIn("PROD requires a signed artifact and SBOM", promotion)
+        self.assertNotIn('if [ "${HAS_ATTESTATION}" = "true" ]', promotion)
+        for secret in (
+            "BEPLY_PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY",
+            "BEPLY_PLUGIN_ARTIFACT_SIGNATURE_KEY_ID",
+        ):
+            block = promotion.split(f"{secret}:", 1)[1].split("\n", 2)
+            self.assertIn("required: true", "\n".join(block))
+
     def test_builds_one_deterministic_payload_without_tooling(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "plugin"
@@ -189,6 +210,21 @@ class DeterministicPluginZipTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (root / "Init.php").write_text("<?php\n", encoding="utf-8")
+            (root / "composer.lock").write_text(
+                json.dumps({"packages": [{"name": "digitick/sepa-xml", "version": "2.3.2"}]}),
+                encoding="utf-8",
+            )
+            (root / "tests").mkdir()
+            (root / "tests" / "package-lock.json").write_text(
+                json.dumps({
+                    "lockfileVersion": 3,
+                    "packages": {
+                        "": {"name": "demo-tests", "version": "1.0.0"},
+                        "node_modules/@playwright/test": {"version": "1.57.0", "dev": True},
+                    },
+                }),
+                encoding="utf-8",
+            )
             zip_path = Path(tmp) / "BeplyDemo-v1.2.zip"
             built = build_plugin_zip(root, zip_path, "BeplyDemo", "1.2")
             output_path = Path(tmp) / "outputs"
@@ -203,6 +239,7 @@ class DeterministicPluginZipTests(unittest.TestCase):
                 "SOURCE_RELEASE_TAG": "v1.2",
                 "SOURCE_RELEASE_URL": "https://github.com/beply-es/BeplyDemo/releases/tag/v1.2",
                 "SOURCE_SHA": "b" * 40,
+                "PLUGIN_ROOT": str(root),
                 "GITHUB_OUTPUT": str(output_path),
             }
 
@@ -222,6 +259,7 @@ class DeterministicPluginZipTests(unittest.TestCase):
             self.assertEqual(outputs["artifact_checksum"], built["checksum"])
             self.assertEqual(int(outputs["file_size"]), built["fileSize"])
             self.assertEqual(outputs["has_attestation"], "false")
+            self.assertEqual(outputs["sbom_component_count"], "2")
             sbom = json.loads(Path(outputs["sbom_path"]).read_text(encoding="utf-8"))
             properties = {
                 item["name"]: item["value"]
@@ -233,10 +271,85 @@ class DeterministicPluginZipTests(unittest.TestCase):
                     "beply:releaseTrack": "main",
                     "beply:artifactKey": "plugins/dev/beplydemo/1.2/plugin.zip",
                     "beply:fileSize": str(built["fileSize"]),
+                    "beply:sourceSha": "b" * 40,
+                    "beply:composerLockSha256": self._sha256(root / "composer.lock"),
+                    "beply:npmLockSha256": self._sha256(root / "tests" / "package-lock.json"),
                     "beply:sourceRepoFullName": "beply-es/BeplyDemo",
                     "beply:sourceReleaseTag": "v1.2",
                 },
             )
+            self.assertEqual(
+                [component["purl"] for component in sbom["components"]],
+                [
+                    "pkg:composer/digitick/sepa-xml@2.3.2",
+                    "pkg:npm/%40playwright/test@1.57.0",
+                ],
+            )
+            self.assertEqual(
+                sbom["dependencies"][0]["dependsOn"],
+                [component["bom-ref"] for component in sbom["components"]],
+            )
+
+    def test_prod_policy_rejects_unsigned_attestation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "plugin"
+            root.mkdir()
+            (root / "facturascripts.ini").write_text(
+                "name = BeplyDemo\nversion = 1.2\n",
+                encoding="utf-8",
+            )
+            zip_path = Path(tmp) / "BeplyDemo-v1.2.zip"
+            build_plugin_zip(root, zip_path, "BeplyDemo", "1.2")
+            environment = {
+                **os.environ,
+                "PLUGIN_NAME": "BeplyDemo",
+                "PLUGIN_VERSION": "1.2",
+                "PLUGIN_ZIP": str(zip_path),
+                "PLUGIN_ROOT": str(root),
+                "SOURCE_SHA": "b" * 40,
+                "REQUIRE_ARTIFACT_SIGNATURE": "true",
+            }
+
+            result = subprocess.run(
+                ["node", "scripts/ci/build_plugin_artifact_attestation.mjs"],
+                cwd=Path(__file__).resolve().parents[2],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("required by release policy", result.stderr)
+
+    def test_zip_embeds_supply_chain_locks_without_test_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "plugin"
+            root.mkdir()
+            (root / "facturascripts.ini").write_text(
+                "name = BeplyDemo\nversion = 1.2\n",
+                encoding="utf-8",
+            )
+            (root / "composer.lock").write_text('{"packages": []}\n', encoding="utf-8")
+            (root / "tests").mkdir()
+            (root / "tests" / "package-lock.json").write_text(
+                '{"lockfileVersion": 3, "packages": {}}\n',
+                encoding="utf-8",
+            )
+            output = Path(tmp) / "candidate.zip"
+
+            build_plugin_zip(root, output, "BeplyDemo", "1.2")
+
+            with ZipFile(output) as archive:
+                names = archive.namelist()
+                self.assertIn("BeplyDemo/.beply/supply-chain/composer.lock", names)
+                self.assertIn("BeplyDemo/.beply/supply-chain/package-lock.json", names)
+                self.assertNotIn("BeplyDemo/tests/package-lock.json", names)
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        import hashlib
+
+        return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
     def test_rejects_symlinked_payload_entries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

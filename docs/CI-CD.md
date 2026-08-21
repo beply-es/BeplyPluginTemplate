@@ -18,8 +18,8 @@
 | `BEPLY_PROD_CI_TOKEN` | Subida del mismo asset a PROD |
 | `BEPLY_DEV_PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY` | Firma DEV opcional; si se declara, requiere key ID |
 | `BEPLY_DEV_PLUGIN_ARTIFACT_SIGNATURE_KEY_ID` | Identidad de clave DEV opcional |
-| `BEPLY_PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY` | Firma PROD opcional; si se declara, requiere key ID |
-| `BEPLY_PLUGIN_ARTIFACT_SIGNATURE_KEY_ID` | Identidad de clave PROD opcional |
+| `BEPLY_PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY` | Firma Ed25519 PROD obligatoria |
+| `BEPLY_PLUGIN_ARTIFACT_SIGNATURE_KEY_ID` | Identidad de clave PROD obligatoria y versionada |
 | `CODECOV_TOKEN` | Cobertura, opcional |
 | `BEPLY_DOCS_AI_API_KEY` | Auditoria IA de docs en tags |
 | `BEPLY_DOCS_AI_MODEL` | Modelo de auditoria IA |
@@ -61,7 +61,18 @@ Variables recomendadas:
 - exactamente un registro `BEPLY_PLUGIN_DEV100_EVIDENCE_JSON`;
 - `versionId`, SHA-256, bytes, tag y source SHA iguales a los esperados;
 - descarga del asset del GitHub Release, sin rebuild;
+- firma Ed25519 obligatoria del par checksum ZIP/checksum SBOM;
+- SBOM CycloneDX determinista con las dependencias bloqueadas de Composer y npm;
 - candidato PROD `pending_review` con evidencia machine-readable.
+
+Los locks de Composer y npm se incorporan al ZIP bajo
+`.beply/supply-chain/` para que la plataforma pueda reconstruir el SBOM desde
+los mismos bytes y comprobar su checksum antes de aprobar. La clave privada
+solo vive en GitHub Actions; la plataforma conserva las claves públicas activas
+por `key id`. La rotación publica primero una clave nueva, cambia el secreto de
+firma, mantiene la anterior durante el periodo de rollback y la retira cuando
+ya no existe ningún candidato promovible firmado con ella. Nunca se reutiliza
+un `key id` para otra clave.
 
 El registro DEV100 canonico contiene solo identidad tecnica no sensible:
 

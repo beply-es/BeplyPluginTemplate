@@ -58,9 +58,9 @@ on:
       BEPLY_PROD_CI_TOKEN:
         required: true
       BEPLY_PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY:
-        required: false
+        required: true
       BEPLY_PLUGIN_ARTIFACT_SIGNATURE_KEY_ID:
-        required: false
+        required: true
     outputs:
       prod_plugin_id:
         value: ${{ jobs.promote.outputs.prod_plugin_id }}
@@ -185,6 +185,7 @@ jobs:
           PLUGIN_NAME: ${{ steps.ini.outputs.name }}
           PLUGIN_VERSION: ${{ steps.ini.outputs.version }}
           PLUGIN_ZIP: /tmp/${{ steps.ini.outputs.name }}-v${{ steps.ini.outputs.version }}.zip
+          PLUGIN_ROOT: plugin
           PLUGIN_RELEASE_TRACK: ${{ inputs.release_track }}
           PLUGIN_ARTIFACT_PREFIX: ${{ inputs.prod_artifact_prefix }}
           SOURCE_REPO_FULL_NAME: ${{ github.repository }}
@@ -193,6 +194,7 @@ jobs:
           SOURCE_SHA: ${{ inputs.expected_commit_sha }}
           PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY: ${{ secrets.BEPLY_PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY }}
           PLUGIN_ARTIFACT_SIGNATURE_KEY_ID: ${{ secrets.BEPLY_PLUGIN_ARTIFACT_SIGNATURE_KEY_ID }}
+          REQUIRE_ARTIFACT_SIGNATURE: "true"
         run: node contract/scripts/ci/build_plugin_artifact_attestation.mjs
 
       - name: Upload exact DEV100 bytes to PROD pending canonical approval
@@ -211,6 +213,7 @@ jobs:
         run: |
           set -euo pipefail
           test -n "${BEPLY_CI_TOKEN}" || { echo "::error::BEPLY_PROD_CI_TOKEN is required"; exit 1; }
+          test "${HAS_ATTESTATION}" = "true" || { echo "::error::PROD requires a signed artifact and SBOM"; exit 1; }
           ZIP="/tmp/${PLUGIN_NAME}-v${PLUGIN_VERSION}.zip"
           test "${{ steps.attestation.outputs.artifact_checksum }}" = "${CHECKSUM}" || { echo "::error::PROD attestation checksum drift"; exit 1; }
           CURL_FIELDS=(
@@ -221,15 +224,13 @@ jobs:
             -F "sourceReleaseUrl=https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
             -F "sourcePublishedAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           )
-          if [ "${HAS_ATTESTATION}" = "true" ]; then
-            CURL_FIELDS+=(
-              -F "artifactSignature=${{ steps.attestation.outputs.artifact_signature }}"
-              -F "artifactSignatureKeyId=${{ steps.attestation.outputs.artifact_signature_key_id }}"
-              -F "sbomUrl=${{ steps.attestation.outputs.sbom_url }}"
-              -F "sbomChecksum=${{ steps.attestation.outputs.sbom_checksum }}"
-              -F "artifactPolicyVersion=${{ steps.attestation.outputs.artifact_policy_version }}"
-            )
-          fi
+          CURL_FIELDS+=(
+            -F "artifactSignature=${{ steps.attestation.outputs.artifact_signature }}"
+            -F "artifactSignatureKeyId=${{ steps.attestation.outputs.artifact_signature_key_id }}"
+            -F "sbomUrl=${{ steps.attestation.outputs.sbom_url }}"
+            -F "sbomChecksum=${{ steps.attestation.outputs.sbom_checksum }}"
+            -F "artifactPolicyVersion=${{ steps.attestation.outputs.artifact_policy_version }}"
+          )
           RESPONSE="$(curl -sS -w '\n%{http_code}' -X POST \
             -H "Authorization: Bearer ${BEPLY_CI_TOKEN}" \
             "${CURL_FIELDS[@]}" \
