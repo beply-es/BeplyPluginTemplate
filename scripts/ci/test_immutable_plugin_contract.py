@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from zipfile import ZipFile
+
+import yaml
 
 from scripts.ci.build_plugin_zip import BuildError, build_plugin_zip
 from scripts.ci.immutable_plugin_contract import (
@@ -326,3 +329,65 @@ class ReleaseAdapterMigrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReusableWorkflowToolingTests(unittest.TestCase):
+    """El runner `arc-runner-set` NO trae `gh` preinstalado.
+
+    La promocion fallaba con `gh: command not found` (exit 127) en
+    `Validate exact DEV100 run`. No era una regresion: ese paso nunca se habia
+    alcanzado porque la promocion moria antes. Este guardarrail impide que
+    vuelva a colarse un workflow que invoque una herramienta que el runner no
+    garantiza.
+
+    Se comprueba la relacion —si se usa, se instala antes— y no un literal, para
+    que no caduque al cambiar de version de la CLI.
+    """
+
+    WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
+
+    def _reusable_workflows(self):
+        return sorted(self.WORKFLOWS.glob("reusable-*.yml"))
+
+    def test_every_workflow_that_uses_gh_installs_it_first(self) -> None:
+        found_any = False
+        for path in self._reusable_workflows():
+            doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+            for job_name, job in (doc.get("jobs") or {}).items():
+                steps = job.get("steps") or []
+                installed_at = None
+                for index, step in enumerate(steps):
+                    body = step.get("run") or ""
+                    if "cli/cli/releases/download" in body:
+                        installed_at = index if installed_at is None else installed_at
+                    uses_gh = re.search(r"(^|[;&|(\s])gh\s+\w", body, re.MULTILINE)
+                    if not uses_gh:
+                        continue
+                    found_any = True
+                    self.assertIsNotNone(
+                        installed_at,
+                        f"{path.name}:{job_name} paso '{step.get('name')}' usa `gh` "
+                        "sin que ningun paso anterior lo instale; el runner no lo trae",
+                    )
+        self.assertTrue(found_any, "ningun workflow reusable usa gh: el test no vigila nada")
+
+    def test_gh_download_is_pinned_and_checksum_verified(self) -> None:
+        for path in self._reusable_workflows():
+            doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+            for job in (doc.get("jobs") or {}).values():
+                for step in job.get("steps") or []:
+                    body = step.get("run") or ""
+                    if "cli/cli/releases/download" not in body:
+                        continue
+                    env = step.get("env") or {}
+                    self.assertIn("GH_CLI_VERSION", env, f"{path.name}: version de gh sin pinear")
+                    self.assertRegex(
+                        str(env.get("GH_CLI_SHA256", "")),
+                        r"^[0-9a-f]{64}$",
+                        f"{path.name}: descarga de gh sin SHA-256 de 64 hex",
+                    )
+                    self.assertIn(
+                        "sha256sum -c",
+                        body,
+                        f"{path.name}: se declara SHA-256 pero no se verifica",
+                    )
