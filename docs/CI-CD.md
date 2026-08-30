@@ -8,6 +8,7 @@
 - Una reejecucion descarga el asset existente; no reconstruye.
 - PROD solo acepta el mismo tag, source SHA, SHA-256 y numero de bytes que superaron DEV100.
 - La promocion descarga el asset existente; nunca ejecuta el builder.
+- Si el repositorio fue renombrado después de publicar un tag histórico, el caller puede declarar la procedencia histórica exacta (`source_repo_full_name`, URL y fecha de publicación). Los overrides de repo y URL viajan juntos, el asset se descarga desde esa identidad y los bytes/checksum/tag/source SHA siguen siendo inmutables.
 
 ## Secrets
 
