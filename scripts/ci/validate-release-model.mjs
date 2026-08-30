@@ -56,7 +56,11 @@ if (isTemplate) {
   check(candidate.includes('pending_review'), 'Candidate contract must leave the DEV candidate pending review')
   check(!candidate.includes('BEPLY_PROD_CI_TOKEN'), 'Candidate contract must not contain PROD credentials')
   check(promotion.includes('gh release download'), 'Promotion contract must download the immutable release asset')
-  check(promotion.includes('--repo "${GITHUB_REPOSITORY}"'), 'Promotion contract must resolve the caller repository explicitly')
+  check(
+    promotion.includes('--repo "${SOURCE_REPO_FULL_NAME}"')
+      && promotion.includes('inputs.source_repo_full_name || github.repository'),
+    'Promotion contract must resolve the effective caller repository explicitly',
+  )
   check(!promotion.includes('build_plugin_zip.py'), 'Promotion contract must never rebuild the plugin payload')
   check(promotion.includes('immutable_plugin_contract.py'), 'Promotion contract must verify machine-readable DEV100 evidence')
   check(promotion.includes('dev_validation_run_id'), 'Promotion contract must pin the DEV100 run')

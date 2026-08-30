@@ -152,6 +152,30 @@ class ImmutableIdentityTests(unittest.TestCase):
         self.assertIn("ALLOW_OTHER_PLUGIN_EVIDENCE", workflow)
         self.assertIn("--allow-other-plugin-records", workflow)
 
+    def test_reusable_promotion_preserves_explicit_historical_provenance(self) -> None:
+        workflow = (
+            Path(__file__).resolve().parents[2]
+            / ".github/workflows/reusable-promote-immutable-plugin-candidate.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("source_repo_full_name:", workflow)
+        self.assertIn("source_release_url:", workflow)
+        self.assertIn("source_published_at:", workflow)
+        self.assertIn(
+            "SOURCE_REPO_FULL_NAME: ${{ inputs.source_repo_full_name || github.repository }}",
+            workflow,
+        )
+        self.assertIn('--repo "${SOURCE_REPO_FULL_NAME}"', workflow)
+        self.assertIn('-F "sourceRepoFullName=${SOURCE_REPO_FULL_NAME}"', workflow)
+        self.assertIn('-F "sourceReleaseUrl=${SOURCE_RELEASE_URL}"', workflow)
+        self.assertIn('-F "sourcePublishedAt=${SOURCE_PUBLISHED_AT_EFFECTIVE}"', workflow)
+        self.assertIn(
+            "source repo and release URL overrides must be supplied together",
+            workflow,
+        )
+        self.assertIn("source release URL mismatch", workflow)
+        self.assertNotIn('-F "sourceRepoFullName=${GITHUB_REPOSITORY}"', workflow)
+
 
 class DeterministicPluginZipTests(unittest.TestCase):
     def test_builds_one_deterministic_payload_without_tooling(self) -> None:
