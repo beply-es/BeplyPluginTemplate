@@ -152,6 +152,21 @@ class ImmutableIdentityTests(unittest.TestCase):
         self.assertIn("ALLOW_OTHER_PLUGIN_EVIDENCE", workflow)
         self.assertIn("--allow-other-plugin-records", workflow)
 
+    def test_reusable_promotion_retains_builtin_github_token_fallback(self) -> None:
+        workflow = (
+            Path(__file__).resolve().parents[2]
+            / ".github/workflows/reusable-promote-immutable-plugin-candidate.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "BEPLY_PROMOTION_GITHUB_TOKEN:\n        required: false",
+            workflow,
+        )
+        self.assertIn(
+            "GH_TOKEN: ${{ secrets.BEPLY_PROMOTION_GITHUB_TOKEN || github.token }}",
+            workflow,
+        )
+
     def test_reusable_promotion_preserves_explicit_historical_provenance(self) -> None:
         workflow = (
             Path(__file__).resolve().parents[2]
