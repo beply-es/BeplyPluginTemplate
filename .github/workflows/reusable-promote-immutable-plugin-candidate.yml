@@ -66,7 +66,7 @@ on:
         type: string
     secrets:
       BEPLY_PROMOTION_GITHUB_TOKEN:
-        required: true
+        required: false
       BEPLY_PROD_CI_TOKEN:
         required: true
       BEPLY_PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY:
@@ -155,7 +155,7 @@ jobs:
 
       - name: Validate exact DEV100 run and machine-readable evidence
         env:
-          GH_TOKEN: ${{ secrets.BEPLY_PROMOTION_GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.BEPLY_PROMOTION_GITHUB_TOKEN || github.token }}
           CONTRACT_SHA: ${{ inputs.contract_sha }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           EXPECTED_COMMIT_SHA: ${{ inputs.expected_commit_sha }}
