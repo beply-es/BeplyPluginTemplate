@@ -78,6 +78,10 @@ on:
         value: ${{ jobs.promote.outputs.prod_plugin_id }}
       prod_version_id:
         value: ${{ jobs.promote.outputs.prod_version_id }}
+      prod_candidate_kind:
+        value: ${{ jobs.promote.outputs.prod_candidate_kind }}
+      prod_submission_id:
+        value: ${{ jobs.promote.outputs.prod_submission_id }}
       prod_candidate_evidence_json:
         value: ${{ jobs.promote.outputs.prod_candidate_evidence_json }}
 
@@ -95,6 +99,8 @@ jobs:
     outputs:
       prod_plugin_id: ${{ steps.upload_prod.outputs.plugin_id }}
       prod_version_id: ${{ steps.upload_prod.outputs.version_id }}
+      prod_candidate_kind: ${{ steps.upload_prod.outputs.candidate_kind }}
+      prod_submission_id: ${{ steps.upload_prod.outputs.submission_id }}
       prod_candidate_evidence_json: ${{ steps.upload_prod.outputs.candidate_evidence_json }}
     steps:
       - name: Install pinned GitHub CLI
@@ -225,6 +231,24 @@ jobs:
           test "sha256:$(sha256sum "${ZIP}" | awk '{print $1}')" = "${EXPECTED_CHECKSUM}" || { echo "::error::immutable asset checksum mismatch"; exit 1; }
           test "$(stat -c %s "${ZIP}")" = "${EXPECTED_FILE_SIZE}" || { echo "::error::immutable asset byte-size mismatch"; exit 1; }
 
+      - name: Resolve canonical GitHub Release publication timestamp
+        id: release_metadata
+        env:
+          GH_TOKEN: ${{ secrets.BEPLY_PROMOTION_GITHUB_TOKEN || github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_REPO_FULL_NAME: ${{ inputs.source_repo_full_name || github.repository }}
+          EXPECTED_SOURCE_PUBLISHED_AT: ${{ inputs.source_published_at }}
+        run: |
+          set -euo pipefail
+          SOURCE_PUBLISHED_AT="$(gh api \
+            "repos/${SOURCE_REPO_FULL_NAME}/releases/tags/${RELEASE_TAG}" \
+            --jq '.published_at // empty')"
+          [[ "${SOURCE_PUBLISHED_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || { echo "::error::GitHub Release published_at is missing or invalid"; exit 1; }
+          if [ -n "${EXPECTED_SOURCE_PUBLISHED_AT}" ]; then
+            test "${SOURCE_PUBLISHED_AT}" = "${EXPECTED_SOURCE_PUBLISHED_AT}" || { echo "::error::source_published_at does not match GitHub Release"; exit 1; }
+          fi
+          echo "source_published_at=${SOURCE_PUBLISHED_AT}" >> "${GITHUB_OUTPUT}"
+
       - name: Generate PROD attestation from existing immutable bytes
         id: attestation
         env:
@@ -256,20 +280,19 @@ jobs:
           HAS_ATTESTATION: ${{ steps.attestation.outputs.has_attestation }}
           SOURCE_REPO_FULL_NAME: ${{ inputs.source_repo_full_name || github.repository }}
           SOURCE_RELEASE_URL: ${{ inputs.source_release_url || format('https://github.com/{0}/releases/tag/{1}', github.repository, inputs.release_tag) }}
-          SOURCE_PUBLISHED_AT: ${{ inputs.source_published_at }}
+          SOURCE_PUBLISHED_AT: ${{ steps.release_metadata.outputs.source_published_at }}
         run: |
           set -euo pipefail
           test -n "${BEPLY_CI_TOKEN}" || { echo "::error::BEPLY_PROD_CI_TOKEN is required"; exit 1; }
           ZIP="/tmp/${PLUGIN_NAME}-v${PLUGIN_VERSION}.zip"
           test "${{ steps.attestation.outputs.artifact_checksum }}" = "${CHECKSUM}" || { echo "::error::PROD attestation checksum drift"; exit 1; }
-          SOURCE_PUBLISHED_AT_EFFECTIVE="${SOURCE_PUBLISHED_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
           CURL_FIELDS=(
             -F "file=@${ZIP}"
             -F "sourceRepoFullName=${SOURCE_REPO_FULL_NAME}"
             -F "sourceBranch=${RELEASE_TRACK}"
             -F "sourceReleaseTag=${RELEASE_TAG}"
             -F "sourceReleaseUrl=${SOURCE_RELEASE_URL}"
-            -F "sourcePublishedAt=${SOURCE_PUBLISHED_AT_EFFECTIVE}"
+            -F "sourcePublishedAt=${SOURCE_PUBLISHED_AT}"
           )
           if [ "${HAS_ATTESTATION}" = "true" ]; then
             CURL_FIELDS+=(
@@ -289,23 +312,50 @@ jobs:
           test "${HTTP_CODE}" -ge 200 && test "${HTTP_CODE}" -lt 300 || { echo "::error::PROD upload failed with HTTP ${HTTP_CODE}"; exit 1; }
           test "$(jq -r '.data.version // empty' <<<"${BODY}")" = "${PLUGIN_VERSION}" || { echo "::error::PROD version mismatch"; exit 1; }
           test "$(jq -r '.data.releaseStatus // empty' <<<"${BODY}")" = "pending_review" || { echo "::error::PROD candidate is not pending_review"; exit 1; }
+          CANDIDATE_KIND="$(jq -r '.data.kind // empty' <<<"${BODY}")"
           PLUGIN_ID="$(jq -r '.data.pluginId // empty' <<<"${BODY}")"
           VERSION_ID="$(jq -r '.data.versionId // empty' <<<"${BODY}")"
-          test -n "${PLUGIN_ID}" && test -n "${VERSION_ID}" || { echo "::error::PROD candidate identity missing"; exit 1; }
-          EVIDENCE="$(jq -cn \
-            --arg schemaVersion 'beply.plugin.prod-candidate.v1' \
-            --arg pluginName "${PLUGIN_NAME}" \
-            --arg version "${PLUGIN_VERSION}" \
-            --arg pluginId "${PLUGIN_ID}" \
-            --arg versionId "${VERSION_ID}" \
-            --arg checksum "${CHECKSUM}" \
-            --argjson fileSize "${FILE_SIZE}" \
-            --arg releaseTag "${RELEASE_TAG}" \
-            --arg sourceSha "${SOURCE_SHA}" \
-            '{schemaVersion:$schemaVersion,pluginName:$pluginName,version:$version,pluginId:$pluginId,versionId:$versionId,checksum:$checksum,fileSize:$fileSize,releaseTag:$releaseTag,sourceSha:$sourceSha}')"
+          SUBMISSION_ID="$(jq -r '.data.submissionId // empty' <<<"${BODY}")"
+          case "${CANDIDATE_KIND}" in
+            plugin_version)
+              test -n "${PLUGIN_ID}" && test -n "${VERSION_ID}" || { echo "::error::PROD version candidate identity missing"; exit 1; }
+              EVIDENCE="$(jq -cn \
+                --arg schemaVersion 'beply.plugin.prod-candidate.v1' \
+                --arg candidateKind 'version' \
+                --arg pluginName "${PLUGIN_NAME}" \
+                --arg version "${PLUGIN_VERSION}" \
+                --arg pluginId "${PLUGIN_ID}" \
+                --arg versionId "${VERSION_ID}" \
+                --arg checksum "${CHECKSUM}" \
+                --argjson fileSize "${FILE_SIZE}" \
+                --arg releaseTag "${RELEASE_TAG}" \
+                --arg sourceSha "${SOURCE_SHA}" \
+                '{schemaVersion:$schemaVersion,candidateKind:$candidateKind,pluginName:$pluginName,version:$version,pluginId:$pluginId,versionId:$versionId,checksum:$checksum,fileSize:$fileSize,releaseTag:$releaseTag,sourceSha:$sourceSha}')"
+              ;;
+            plugin_submission)
+              test -n "${SUBMISSION_ID}" || { echo "::error::PROD submission candidate identity missing"; exit 1; }
+              EVIDENCE="$(jq -cn \
+                --arg schemaVersion 'beply.plugin.prod-submission-candidate.v1' \
+                --arg candidateKind 'submission' \
+                --arg pluginName "${PLUGIN_NAME}" \
+                --arg version "${PLUGIN_VERSION}" \
+                --arg submissionId "${SUBMISSION_ID}" \
+                --arg checksum "${CHECKSUM}" \
+                --argjson fileSize "${FILE_SIZE}" \
+                --arg releaseTag "${RELEASE_TAG}" \
+                --arg sourceSha "${SOURCE_SHA}" \
+                '{schemaVersion:$schemaVersion,candidateKind:$candidateKind,pluginName:$pluginName,version:$version,submissionId:$submissionId,checksum:$checksum,fileSize:$fileSize,releaseTag:$releaseTag,sourceSha:$sourceSha}')"
+              ;;
+            *)
+              echo "::error::PROD candidate kind is missing or unsupported"
+              exit 1
+              ;;
+          esac
           {
             echo "plugin_id=${PLUGIN_ID}"
             echo "version_id=${VERSION_ID}"
+            echo "candidate_kind=${CANDIDATE_KIND}"
+            echo "submission_id=${SUBMISSION_ID}"
             echo "candidate_evidence_json=${EVIDENCE}"
           } >> "${GITHUB_OUTPUT}"
           echo "BEPLY_PLUGIN_PROD_CANDIDATE_EVIDENCE_JSON=${EVIDENCE}" | tee -a "${GITHUB_STEP_SUMMARY}"

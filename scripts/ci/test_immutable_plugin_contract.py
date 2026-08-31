@@ -183,7 +183,8 @@ class ImmutableIdentityTests(unittest.TestCase):
         self.assertIn('--repo "${SOURCE_REPO_FULL_NAME}"', workflow)
         self.assertIn('-F "sourceRepoFullName=${SOURCE_REPO_FULL_NAME}"', workflow)
         self.assertIn('-F "sourceReleaseUrl=${SOURCE_RELEASE_URL}"', workflow)
-        self.assertIn('-F "sourcePublishedAt=${SOURCE_PUBLISHED_AT_EFFECTIVE}"', workflow)
+        self.assertIn('-F "sourcePublishedAt=${SOURCE_PUBLISHED_AT}"', workflow)
+        self.assertIn("source_published_at does not match GitHub Release", workflow)
         self.assertIn(
             "source repo and release URL overrides must be supplied together",
             workflow,

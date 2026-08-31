@@ -38,6 +38,10 @@ on:
         value: ${{ jobs.publish.outputs.plugin_id }}
       version_id:
         value: ${{ jobs.publish.outputs.version_id }}
+      candidate_kind:
+        value: ${{ jobs.publish.outputs.candidate_kind }}
+      submission_id:
+        value: ${{ jobs.publish.outputs.submission_id }}
       checksum:
         value: ${{ jobs.publish.outputs.checksum }}
       file_size:
@@ -64,6 +68,8 @@ jobs:
       plugin_version: ${{ steps.ini.outputs.version }}
       plugin_id: ${{ steps.upload_dev.outputs.plugin_id }}
       version_id: ${{ steps.upload_dev.outputs.version_id }}
+      candidate_kind: ${{ steps.upload_dev.outputs.candidate_kind }}
+      submission_id: ${{ steps.upload_dev.outputs.submission_id }}
       checksum: ${{ steps.measure.outputs.checksum }}
       file_size: ${{ steps.measure.outputs.file_size }}
       release_tag: ${{ github.ref_name }}
@@ -212,6 +218,26 @@ jobs:
           --pattern "${{ steps.ini.outputs.name }}-v${{ steps.ini.outputs.version }}.zip"
           --dir /tmp
 
+      - name: Resolve canonical GitHub Release publication timestamp
+        id: release_metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          SOURCE_PUBLISHED_AT=""
+          for attempt in 1 2 3 4 5; do
+            SOURCE_PUBLISHED_AT="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" \
+              --jq '.published_at // empty' 2>/dev/null || true)"
+            if [[ "${SOURCE_PUBLISHED_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+              break
+            fi
+            sleep 2
+          done
+          [[ "${SOURCE_PUBLISHED_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || { echo "::error::GitHub Release published_at is missing or invalid"; exit 1; }
+          echo "source_published_at=${SOURCE_PUBLISHED_AT}" >> "${GITHUB_OUTPUT}"
+
       - name: Measure exact immutable asset
         id: measure
         env:
@@ -251,6 +277,7 @@ jobs:
           FILE_SIZE: ${{ steps.measure.outputs.file_size }}
           RELEASE_TRACK: ${{ inputs.release_track }}
           HAS_ATTESTATION: ${{ steps.attestation.outputs.has_attestation }}
+          SOURCE_PUBLISHED_AT: ${{ steps.release_metadata.outputs.source_published_at }}
         run: |
           set -euo pipefail
           test -n "${BEPLY_CI_TOKEN}" || { echo "::error::BEPLY_DEV_CI_TOKEN is required"; exit 1; }
@@ -262,7 +289,7 @@ jobs:
             -F "sourceBranch=${RELEASE_TRACK}"
             -F "sourceReleaseTag=${GITHUB_REF_NAME}"
             -F "sourceReleaseUrl=https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}"
-            -F "sourcePublishedAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            -F "sourcePublishedAt=${SOURCE_PUBLISHED_AT}"
           )
           if [ "${HAS_ATTESTATION}" = "true" ]; then
             CURL_FIELDS+=(
@@ -282,23 +309,50 @@ jobs:
           test "${HTTP_CODE}" -ge 200 && test "${HTTP_CODE}" -lt 300 || { echo "::error::DEV upload failed with HTTP ${HTTP_CODE}"; exit 1; }
           test "$(jq -r '.data.version // empty' <<<"${BODY}")" = "${PLUGIN_VERSION}" || { echo "::error::DEV version mismatch"; exit 1; }
           test "$(jq -r '.data.releaseStatus // empty' <<<"${BODY}")" = "pending_review" || { echo "::error::DEV candidate is not pending_review"; exit 1; }
+          CANDIDATE_KIND="$(jq -r '.data.kind // empty' <<<"${BODY}")"
           PLUGIN_ID="$(jq -r '.data.pluginId // empty' <<<"${BODY}")"
           VERSION_ID="$(jq -r '.data.versionId // empty' <<<"${BODY}")"
-          test -n "${PLUGIN_ID}" && test -n "${VERSION_ID}" || { echo "::error::DEV candidate identity missing"; exit 1; }
-          EVIDENCE="$(jq -cn \
-            --arg schemaVersion 'beply.plugin.candidate.v1' \
-            --arg pluginName "${PLUGIN_NAME}" \
-            --arg version "${PLUGIN_VERSION}" \
-            --arg pluginId "${PLUGIN_ID}" \
-            --arg versionId "${VERSION_ID}" \
-            --arg checksum "${CHECKSUM}" \
-            --argjson fileSize "${FILE_SIZE}" \
-            --arg releaseTag "${GITHUB_REF_NAME}" \
-            --arg sourceSha "${GITHUB_SHA}" \
-            '{schemaVersion:$schemaVersion,pluginName:$pluginName,version:$version,pluginId:$pluginId,versionId:$versionId,checksum:$checksum,fileSize:$fileSize,releaseTag:$releaseTag,sourceSha:$sourceSha}')"
+          SUBMISSION_ID="$(jq -r '.data.submissionId // empty' <<<"${BODY}")"
+          case "${CANDIDATE_KIND}" in
+            plugin_version)
+              test -n "${PLUGIN_ID}" && test -n "${VERSION_ID}" || { echo "::error::DEV version candidate identity missing"; exit 1; }
+              EVIDENCE="$(jq -cn \
+                --arg schemaVersion 'beply.plugin.candidate.v1' \
+                --arg candidateKind 'version' \
+                --arg pluginName "${PLUGIN_NAME}" \
+                --arg version "${PLUGIN_VERSION}" \
+                --arg pluginId "${PLUGIN_ID}" \
+                --arg versionId "${VERSION_ID}" \
+                --arg checksum "${CHECKSUM}" \
+                --argjson fileSize "${FILE_SIZE}" \
+                --arg releaseTag "${GITHUB_REF_NAME}" \
+                --arg sourceSha "${GITHUB_SHA}" \
+                '{schemaVersion:$schemaVersion,candidateKind:$candidateKind,pluginName:$pluginName,version:$version,pluginId:$pluginId,versionId:$versionId,checksum:$checksum,fileSize:$fileSize,releaseTag:$releaseTag,sourceSha:$sourceSha}')"
+              ;;
+            plugin_submission)
+              test -n "${SUBMISSION_ID}" || { echo "::error::DEV submission candidate identity missing"; exit 1; }
+              EVIDENCE="$(jq -cn \
+                --arg schemaVersion 'beply.plugin.submission-candidate.v1' \
+                --arg candidateKind 'submission' \
+                --arg pluginName "${PLUGIN_NAME}" \
+                --arg version "${PLUGIN_VERSION}" \
+                --arg submissionId "${SUBMISSION_ID}" \
+                --arg checksum "${CHECKSUM}" \
+                --argjson fileSize "${FILE_SIZE}" \
+                --arg releaseTag "${GITHUB_REF_NAME}" \
+                --arg sourceSha "${GITHUB_SHA}" \
+                '{schemaVersion:$schemaVersion,candidateKind:$candidateKind,pluginName:$pluginName,version:$version,submissionId:$submissionId,checksum:$checksum,fileSize:$fileSize,releaseTag:$releaseTag,sourceSha:$sourceSha}')"
+              ;;
+            *)
+              echo "::error::DEV candidate kind is missing or unsupported"
+              exit 1
+              ;;
+          esac
           {
             echo "plugin_id=${PLUGIN_ID}"
             echo "version_id=${VERSION_ID}"
+            echo "candidate_kind=${CANDIDATE_KIND}"
+            echo "submission_id=${SUBMISSION_ID}"
             echo "candidate_evidence_json=${EVIDENCE}"
           } >> "${GITHUB_OUTPUT}"
           echo "BEPLY_PLUGIN_CANDIDATE_EVIDENCE_JSON=${EVIDENCE}" | tee -a "${GITHUB_STEP_SUMMARY}"
