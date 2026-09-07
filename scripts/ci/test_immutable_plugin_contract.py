@@ -192,6 +192,17 @@ class ImmutableIdentityTests(unittest.TestCase):
         self.assertIn("source release URL mismatch", workflow)
         self.assertNotIn('-F "sourceRepoFullName=${GITHUB_REPOSITORY}"', workflow)
 
+    def test_release_metadata_uses_the_asset_repository_read_identity(self) -> None:
+        path = Path(__file__).resolve().parents[2] / ".github/workflows/reusable-promote-immutable-plugin-candidate.yml"
+        steps = yaml.safe_load(path.read_text())["jobs"]["promote"]["steps"]
+        metadata = next(step for step in steps if step.get("id") == "release_metadata")
+        asset = next(step for step in steps if "gh release download" in step.get("run", ""))
+        evidence = next(step for step in steps if "RUN_JSON=" in step.get("run", ""))
+        self.assertEqual(metadata["env"]["GH_TOKEN"], asset["env"]["GH_TOKEN"])
+        self.assertEqual(metadata["env"]["SOURCE_REPO_FULL_NAME"], asset["env"]["SOURCE_REPO_FULL_NAME"])
+        self.assertNotEqual(metadata["env"]["GH_TOKEN"], evidence["env"]["GH_TOKEN"])
+        self.assertIn("secrets.BEPLY_PROMOTION_GITHUB_TOKEN", evidence["env"]["GH_TOKEN"])
+
     def test_release_uploads_use_canonical_github_publication_timestamp(self) -> None:
         workflows = (
             Path(__file__).resolve().parents[2]
