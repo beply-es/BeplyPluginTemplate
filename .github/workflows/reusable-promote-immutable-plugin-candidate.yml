@@ -234,7 +234,7 @@ jobs:
       - name: Resolve canonical GitHub Release publication timestamp
         id: release_metadata
         env:
-          GH_TOKEN: ${{ secrets.BEPLY_PROMOTION_GITHUB_TOKEN || github.token }}
+          GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           SOURCE_REPO_FULL_NAME: ${{ inputs.source_repo_full_name || github.repository }}
           EXPECTED_SOURCE_PUBLISHED_AT: ${{ inputs.source_published_at }}

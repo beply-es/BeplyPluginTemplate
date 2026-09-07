@@ -27,6 +27,12 @@
 | `BEPLY_DOCS_AI_PROVIDER` | Proveedor, por defecto `openai` |
 | `BEPLY_DOCS_REPO_PATH` | Sync local de docs |
 
+La descarga del asset y la lectura de `published_at` usan `github.token` para
+la misma identidad `source_repo_full_name`. `BEPLY_PROMOTION_GITHUB_TOKEN` se
+reserva para el run/log DEV100, que puede estar en otro repositorio privado.
+No se presupone que ese token de evidencia tenga acceso al repositorio del
+plugin. Los permisos existentes no se amplían para completar la promoción.
+
 Variables recomendadas:
 
 | Variable | Uso |
