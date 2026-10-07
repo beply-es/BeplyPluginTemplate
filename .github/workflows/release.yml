@@ -107,6 +107,10 @@ jobs:
     with:
       contract_sha: ${{ github.sha }}
       release_track: main
+      # A local call can never satisfy a tag-publisher trust root (it requires
+      # `uses: beply-es/BeplyPluginTemplate/...@<allowlisted sha40>`), so the
+      # template itself uploads the carrier but does not claim provenance.
+      submit_source_provenance: false
     secrets:
       BEPLY_DEV_CI_TOKEN: ${{ secrets.BEPLY_DEV_CI_TOKEN }}
       BEPLY_DEV_PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY: ${{ secrets.BEPLY_DEV_PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY }}

@@ -49,6 +49,9 @@ jobs:
       - name: Unit test immutable plugin artifact contract
         run: python3 -m unittest scripts/ci/test_immutable_plugin_contract.py
 
+      - name: Unit test source provenance manifest contract
+        run: node --test scripts/ci/test_source_provenance_manifest.mjs
+
       - name: Validate documentation impact
         run: node scripts/ci/validate-docs-impact.mjs
 

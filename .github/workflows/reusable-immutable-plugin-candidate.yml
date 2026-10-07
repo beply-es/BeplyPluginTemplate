@@ -22,6 +22,21 @@ on:
         required: false
         default: plugins/dev
         type: string
+      caller_job_key:
+        description: Key of the caller job that invokes this workflow (manifest source.publisherJobKey)
+        required: false
+        default: publish_immutable_candidate
+        type: string
+      submit_source_provenance:
+        description: Send the beply-plugin-source-provenance-v1 locator with the DEV upload; the platform fails closed when it cannot verify it
+        required: false
+        default: true
+        type: boolean
+      source_provenance_environment:
+        description: Platform environment that verifies the source provenance locator (dev or production)
+        required: false
+        default: dev
+        type: string
     secrets:
       BEPLY_DEV_CI_TOKEN:
         required: true
@@ -52,29 +67,39 @@ on:
         value: ${{ jobs.publish.outputs.source_sha }}
       candidate_evidence_json:
         value: ${{ jobs.publish.outputs.candidate_evidence_json }}
+      source_provenance_artifact_id:
+        value: ${{ jobs.source_provenance.outputs.artifact_id }}
+      source_provenance_publisher_job_id:
+        value: ${{ jobs.source_provenance.outputs.publisher_job_id }}
+      source_provenance_manifest_sha256:
+        value: ${{ jobs.source_provenance.outputs.manifest_sha256 }}
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
-  publish:
-    name: Publish One Immutable Candidate And Upload Same Bytes To DEV
+  # The platform verifier (tag-publisher trust root) reads THIS job at the
+  # allowlisted template SHA: its key, its name, and exactly one upload step
+  # named "Upload plugin source provenance carrier" using
+  # actions/upload-artifact@<sha40> with the literal artifact name below. The
+  # POST lives in a separate job that `needs:` this one, so the publisher job is
+  # already completed/success when the platform reads the run jobs API.
+  source_provenance:
+    name: Publish Immutable Release And Source Provenance Carrier
     runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
     timeout-minutes: 20
     permissions:
+      actions: read
       contents: write
     outputs:
       plugin_name: ${{ steps.ini.outputs.name }}
       plugin_version: ${{ steps.ini.outputs.version }}
-      plugin_id: ${{ steps.upload_dev.outputs.plugin_id }}
-      version_id: ${{ steps.upload_dev.outputs.version_id }}
-      candidate_kind: ${{ steps.upload_dev.outputs.candidate_kind }}
-      submission_id: ${{ steps.upload_dev.outputs.submission_id }}
       checksum: ${{ steps.measure.outputs.checksum }}
       file_size: ${{ steps.measure.outputs.file_size }}
-      release_tag: ${{ github.ref_name }}
-      source_sha: ${{ github.sha }}
-      candidate_evidence_json: ${{ steps.upload_dev.outputs.candidate_evidence_json }}
+      source_published_at: ${{ steps.release_metadata.outputs.source_published_at }}
+      publisher_job_id: ${{ steps.provenance_manifest.outputs.publisher_job_id }}
+      manifest_sha256: ${{ steps.provenance_manifest.outputs.manifest_sha256 }}
+      artifact_id: ${{ steps.provenance_carrier.outputs.artifact-id }}
     steps:
       - name: Install pinned GitHub CLI
         env:
@@ -117,6 +142,7 @@ jobs:
         env:
           CONTRACT_SHA: ${{ inputs.contract_sha }}
           RELEASE_TRACK: ${{ inputs.release_track }}
+          CALLER_JOB_KEY: ${{ inputs.caller_job_key }}
         run: |
           set -euo pipefail
           case "${CONTRACT_SHA}" in ????????????????????????????????????????) ;; *) echo "::error::contract_sha must be 40 hex"; exit 1;; esac
@@ -125,7 +151,18 @@ jobs:
           test "$(git -C plugin rev-parse HEAD)" = "${GITHUB_SHA}" || { echo "::error::caller source SHA mismatch"; exit 1; }
           test "${GITHUB_EVENT_NAME}" = "push" || { echo "::error::candidate must originate from a tag push"; exit 1; }
           test "${GITHUB_REF_TYPE}" = "tag" || { echo "::error::candidate requires an immutable tag"; exit 1; }
+          test "${GITHUB_REF}" = "refs/tags/${GITHUB_REF_NAME}" || { echo "::error::candidate ref must be the pushed tag"; exit 1; }
           test "${RELEASE_TRACK}" = "main" || { echo "::error::release track must be exactly main"; exit 1; }
+          [[ "${CALLER_JOB_KEY}" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]] || { echo "::error::caller_job_key is invalid"; exit 1; }
+
+      - name: Verify release tag peels to the run commit
+        run: |
+          set -euo pipefail
+          # Re-read the tag from origin: an annotated or lightweight tag must
+          # peel to exactly the commit this run builds, or nothing is published.
+          git -C plugin fetch --force --no-tags origin "+refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          PEELED="$(git -C plugin rev-parse --verify "refs/tags/${GITHUB_REF_NAME}^{commit}")"
+          test "${PEELED}" = "${GITHUB_SHA}" || { echo "::error::release tag does not peel to the run commit"; exit 1; }
 
       - name: Parse and validate plugin identity
         id: ini
@@ -250,12 +287,120 @@ jobs:
             echo "file_size=$(stat -c %s "${ASSET}")"
           } >> "${GITHUB_OUTPUT}"
 
+      - name: Build source provenance manifest
+        id: provenance_manifest
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PLUGIN_ROOT: plugin
+          PLUGIN_ZIP: /tmp/${{ steps.ini.outputs.name }}-v${{ steps.ini.outputs.version }}.zip
+          PLUGIN_NAME: ${{ steps.ini.outputs.name }}
+          PLUGIN_VERSION: ${{ steps.ini.outputs.version }}
+          MANIFEST_DIR: ${{ runner.temp }}/plugin-source-provenance
+          CALLER_JOB_KEY: ${{ inputs.caller_job_key }}
+          PUBLISHER_JOB_NAME: Publish Immutable Release And Source Provenance Carrier
+        run: node contract/scripts/ci/build_source_provenance_manifest.mjs
+
+      - name: Upload plugin source provenance carrier
+        id: provenance_carrier
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: plugin-source-provenance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.provenance_manifest.outputs.manifest_path }}
+          if-no-files-found: error
+
+      - name: Validate source provenance carrier identity
+        env:
+          ARTIFACT_ID: ${{ steps.provenance_carrier.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.provenance_carrier.outputs.artifact-digest }}
+          PUBLISHER_JOB_ID: ${{ steps.provenance_manifest.outputs.publisher_job_id }}
+        run: |
+          set -euo pipefail
+          [[ "${ARTIFACT_ID}" =~ ^[1-9][0-9]{0,15}$ ]] || { echo "::error::carrier artifact id is missing"; exit 1; }
+          [[ "${PUBLISHER_JOB_ID}" =~ ^[1-9][0-9]{0,15}$ ]] || { echo "::error::publisher job id is missing"; exit 1; }
+          [[ "${ARTIFACT_DIGEST}" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::carrier artifact digest is missing"; exit 1; }
+
+  publish:
+    name: Publish One Immutable Candidate And Upload Same Bytes To DEV
+    needs: source_provenance
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      plugin_name: ${{ needs.source_provenance.outputs.plugin_name }}
+      plugin_version: ${{ needs.source_provenance.outputs.plugin_version }}
+      plugin_id: ${{ steps.upload_dev.outputs.plugin_id }}
+      version_id: ${{ steps.upload_dev.outputs.version_id }}
+      candidate_kind: ${{ steps.upload_dev.outputs.candidate_kind }}
+      submission_id: ${{ steps.upload_dev.outputs.submission_id }}
+      checksum: ${{ needs.source_provenance.outputs.checksum }}
+      file_size: ${{ needs.source_provenance.outputs.file_size }}
+      release_tag: ${{ github.ref_name }}
+      source_sha: ${{ github.sha }}
+      candidate_evidence_json: ${{ steps.upload_dev.outputs.candidate_evidence_json }}
+    steps:
+      - name: Install pinned GitHub CLI
+        env:
+          GH_CLI_VERSION: 2.96.0
+          GH_CLI_ARCHIVE: gh_2.96.0_linux_arm64.tar.gz
+          GH_CLI_SHA256: 06f86ec7103d41993b76cd78072f43595c34aaa56506d971d9860e67140bf909
+        run: |
+          set -euo pipefail
+          archive="${GH_CLI_ARCHIVE}"
+          archive_path="${RUNNER_TEMP}/${archive}"
+          curl -fsSL \
+            "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/${archive}" \
+            -o "${archive_path}"
+          printf '%s  %s\n' "${GH_CLI_SHA256}" "${archive_path}" | sha256sum -c -
+          tar -xzf "${archive_path}" -C "${RUNNER_TEMP}"
+          install -d "${RUNNER_TEMP}/gh-bin"
+          install -m 0755 \
+            "${RUNNER_TEMP}/gh_${GH_CLI_VERSION}_linux_arm64/bin/gh" \
+            "${RUNNER_TEMP}/gh-bin/gh"
+          printf '%s\n' "${RUNNER_TEMP}/gh-bin" >> "${GITHUB_PATH}"
+
+      - name: Checkout immutable promotion contract
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: beply-es/BeplyPluginTemplate
+          ref: ${{ inputs.contract_sha }}
+          path: contract
+
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "24"
+
+      - name: Validate immutable contract and provenance inputs
+        env:
+          CONTRACT_SHA: ${{ inputs.contract_sha }}
+          SOURCE_PROVENANCE_ENVIRONMENT: ${{ inputs.source_provenance_environment }}
+        run: |
+          set -euo pipefail
+          test "$(git -C contract rev-parse HEAD)" = "${CONTRACT_SHA}" || { echo "::error::contract checkout mismatch"; exit 1; }
+          test "${GITHUB_REF_TYPE}" = "tag" || { echo "::error::candidate requires an immutable tag"; exit 1; }
+          case "${SOURCE_PROVENANCE_ENVIRONMENT}" in dev|production) ;; *) echo "::error::source_provenance_environment must be dev or production"; exit 1;; esac
+
+      - name: Download the exact immutable release asset published by the carrier job
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET_NAME: ${{ needs.source_provenance.outputs.plugin_name }}-v${{ needs.source_provenance.outputs.plugin_version }}.zip
+          EXPECTED_CHECKSUM: ${{ needs.source_provenance.outputs.checksum }}
+          EXPECTED_FILE_SIZE: ${{ needs.source_provenance.outputs.file_size }}
+        run: |
+          set -euo pipefail
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "${ASSET_NAME}" \
+            --dir /tmp
+          test "sha256:$(sha256sum "/tmp/${ASSET_NAME}" | awk '{print $1}')" = "${EXPECTED_CHECKSUM}" || { echo "::error::release asset checksum drift"; exit 1; }
+          test "$(stat -c %s "/tmp/${ASSET_NAME}")" = "${EXPECTED_FILE_SIZE}" || { echo "::error::release asset size drift"; exit 1; }
+
       - name: Generate DEV artifact attestation from immutable bytes
         id: attestation
         env:
-          PLUGIN_NAME: ${{ steps.ini.outputs.name }}
-          PLUGIN_VERSION: ${{ steps.ini.outputs.version }}
-          PLUGIN_ZIP: /tmp/${{ steps.ini.outputs.name }}-v${{ steps.ini.outputs.version }}.zip
+          PLUGIN_NAME: ${{ needs.source_provenance.outputs.plugin_name }}
+          PLUGIN_VERSION: ${{ needs.source_provenance.outputs.plugin_version }}
+          PLUGIN_ZIP: /tmp/${{ needs.source_provenance.outputs.plugin_name }}-v${{ needs.source_provenance.outputs.plugin_version }}.zip
           PLUGIN_RELEASE_TRACK: ${{ inputs.release_track }}
           PLUGIN_ARTIFACT_PREFIX: ${{ inputs.dev_artifact_prefix }}
           SOURCE_REPO_FULL_NAME: ${{ github.repository }}
@@ -271,13 +416,17 @@ jobs:
         env:
           BEPLY_API_URL: ${{ inputs.dev_api_url }}
           BEPLY_CI_TOKEN: ${{ secrets.BEPLY_DEV_CI_TOKEN }}
-          PLUGIN_NAME: ${{ steps.ini.outputs.name }}
-          PLUGIN_VERSION: ${{ steps.ini.outputs.version }}
-          CHECKSUM: ${{ steps.measure.outputs.checksum }}
-          FILE_SIZE: ${{ steps.measure.outputs.file_size }}
+          PLUGIN_NAME: ${{ needs.source_provenance.outputs.plugin_name }}
+          PLUGIN_VERSION: ${{ needs.source_provenance.outputs.plugin_version }}
+          CHECKSUM: ${{ needs.source_provenance.outputs.checksum }}
+          FILE_SIZE: ${{ needs.source_provenance.outputs.file_size }}
           RELEASE_TRACK: ${{ inputs.release_track }}
           HAS_ATTESTATION: ${{ steps.attestation.outputs.has_attestation }}
-          SOURCE_PUBLISHED_AT: ${{ steps.release_metadata.outputs.source_published_at }}
+          SOURCE_PUBLISHED_AT: ${{ needs.source_provenance.outputs.source_published_at }}
+          SUBMIT_SOURCE_PROVENANCE: ${{ inputs.submit_source_provenance }}
+          SOURCE_PROVENANCE_ENVIRONMENT: ${{ inputs.source_provenance_environment }}
+          MANIFEST_ARTIFACT_ID: ${{ needs.source_provenance.outputs.artifact_id }}
+          PUBLISHER_JOB_ID: ${{ needs.source_provenance.outputs.publisher_job_id }}
         run: |
           set -euo pipefail
           test -n "${BEPLY_CI_TOKEN}" || { echo "::error::BEPLY_DEV_CI_TOKEN is required"; exit 1; }
@@ -286,11 +435,31 @@ jobs:
           CURL_FIELDS=(
             -F "file=@${ZIP}"
             -F "sourceRepoFullName=${GITHUB_REPOSITORY}"
-            -F "sourceBranch=${RELEASE_TRACK}"
             -F "sourceReleaseTag=${GITHUB_REF_NAME}"
             -F "sourceReleaseUrl=https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}"
             -F "sourcePublishedAt=${SOURCE_PUBLISHED_AT}"
           )
+          if [ "${SUBMIT_SOURCE_PROVENANCE}" = "true" ]; then
+            # Locator of the carrier uploaded by the completed `source_provenance`
+            # job. With a locator the platform binds sourceBranch to the tag ref,
+            # so the track is sent explicitly.
+            [[ "${MANIFEST_ARTIFACT_ID}" =~ ^[1-9][0-9]{0,15}$ ]] || { echo "::error::carrier artifact id is missing"; exit 1; }
+            [[ "${PUBLISHER_JOB_ID}" =~ ^[1-9][0-9]{0,15}$ ]] || { echo "::error::publisher job id is missing"; exit 1; }
+            SOURCE_PROVENANCE_LOCATOR="$(jq -cn \
+              --argjson runId "${GITHUB_RUN_ID}" \
+              --argjson runAttempt "${GITHUB_RUN_ATTEMPT}" \
+              --argjson publisherJobId "${PUBLISHER_JOB_ID}" \
+              --argjson manifestArtifactId "${MANIFEST_ARTIFACT_ID}" \
+              '{runId:$runId,runAttempt:$runAttempt,publisherJobId:$publisherJobId,manifestArtifactId:$manifestArtifactId}')"
+            CURL_FIELDS+=(
+              -F "sourceBranch=${GITHUB_REF_NAME}"
+              -F "releaseTrack=${RELEASE_TRACK}"
+              --form-string "sourceProvenance=${SOURCE_PROVENANCE_LOCATOR}"
+              -F "sourceProvenanceEnvironment=${SOURCE_PROVENANCE_ENVIRONMENT}"
+            )
+          else
+            CURL_FIELDS+=(-F "sourceBranch=${RELEASE_TRACK}")
+          fi
           if [ "${HAS_ATTESTATION}" = "true" ]; then
             CURL_FIELDS+=(
               -F "artifactSignature=${{ steps.attestation.outputs.artifact_signature }}"
