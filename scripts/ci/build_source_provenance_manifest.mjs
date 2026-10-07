@@ -148,6 +148,14 @@ export function selectReleaseAsset(release, { tag, assetName, zipSha256, zipSize
   }
 }
 
+/** Tag push (publish) or provenance-only workflow_dispatch on the tag ref; never a branch. */
+export function sourceEvent(eventName, refType, ref, tag) {
+  if (!['push', 'workflow_dispatch'].includes(eventName) || refType !== 'tag' || ref !== `refs/tags/${tag}`) {
+    fail('source provenance requires a tag push or a dispatch on the tag ref')
+  }
+  return eventName
+}
+
 export function buildManifest(facts) {
   return validateManifest({
     schema: MANIFEST_SCHEMA,
@@ -211,9 +219,7 @@ async function main() {
   const commitSha = required('GITHUB_SHA')
   const runId = positiveId(required('GITHUB_RUN_ID'), 'GITHUB_RUN_ID')
   const runAttempt = positiveId(required('GITHUB_RUN_ATTEMPT'), 'GITHUB_RUN_ATTEMPT')
-  if (required('GITHUB_EVENT_NAME') !== 'push' || required('GITHUB_REF_TYPE') !== 'tag' || ref !== `refs/tags/${tag}`) {
-    fail('source provenance requires a tag push')
-  }
+  const event = sourceEvent(required('GITHUB_EVENT_NAME'), required('GITHUB_REF_TYPE'), ref, tag)
   const pluginRoot = required('PLUGIN_ROOT')
   const zipPath = required('PLUGIN_ZIP')
   const outputDir = required('MANIFEST_DIR')
@@ -256,7 +262,7 @@ async function main() {
     runAttempt,
     publisherJobKey: required('CALLER_JOB_KEY'),
     publisherJobId,
-    event: 'push',
+    event,
     ref,
     ...selected,
     pluginName: required('PLUGIN_NAME'),

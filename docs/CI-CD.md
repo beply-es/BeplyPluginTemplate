@@ -111,6 +111,20 @@ workflow llamador y su blob en ese commit, run/attempt, `publisherJobKey` (clave
 del job llamador, `caller_job_key`), id del job interno, evento y ref; release id
 y `published_at`; asset id, nombre, `digest` de la API y bytes; y `fsName`/version.
 
+El ZIP se construye siempre una sola vez, de forma determinista, y el asset
+publicado (nuevo o reutilizado) se descarga y se compara byte a byte con esa
+construccion antes de firmar el manifiesto. Un asset subido a mano o
+pre-colocado falla cerrado.
+
+Modo «solo procedencia»: un `workflow_dispatch` sobre el ref del tag ya
+publicado no crea ninguna release y exige que exista; reconstruye, compara byte a
+byte con el asset publicado, genera el portador con `event=workflow_dispatch` y
+hace POST del mismo asset para mejorar el testigo de la version existente. Para
+usarlo, el `release.yml` del plugin **en el commit del tag** tiene que declarar
+`workflow_dispatch` y llamar ya a este reusable, y la raiz tiene que incluir
+`workflow_dispatch` en `events`. Los tags anteriores a este contrato no se
+pueden rellenar asi.
+
 Como el POST sale del mismo run, la plataforma registra el testigo como
 `pending` (el job publicador ya esta `completed/success`, el run no). Cuando el
 run termina en `success`, la plataforma lo reverifica y lo pasa a `verified`.

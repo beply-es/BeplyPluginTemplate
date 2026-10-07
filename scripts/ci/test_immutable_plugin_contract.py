@@ -491,6 +491,27 @@ class SourceProvenanceCarrierTests(unittest.TestCase):
         self.assertEqual(inputs["caller_job_key"]["default"], "publish_immutable_candidate")
         self.assertNotIn("BEPLY_DEV_CI_TOKEN", str(doc["jobs"][self.INNER_JOB_KEY]))
 
+    def test_every_published_asset_is_byte_compared_with_one_deterministic_build(self) -> None:
+        steps = self._candidate()["jobs"][self.INNER_JOB_KEY]["steps"]
+        build = next(step for step in steps if "build_plugin_zip.py" in (step.get("run") or ""))
+        self.assertNotIn("if", build, "the deterministic build must always run")
+        self.assertIn("/tmp/build/", build["run"])
+        compare = next(step for step in steps if "cmp " in (step.get("run") or ""))
+        self.assertNotIn("if", compare, "every asset, new or reused, is byte-compared")
+        self.assertIn("gh release download", compare["run"])
+        names = [step.get("name") for step in steps]
+        self.assertLess(names.index(compare["name"]), names.index("Build source provenance manifest"))
+
+    def test_provenance_only_dispatch_never_creates_a_release_and_requires_one(self) -> None:
+        steps = self._candidate()["jobs"][self.INNER_JOB_KEY]["steps"]
+        create = next(step for step in steps if step.get("name") == "Create immutable GitHub Release asset")
+        self.assertIn("github.event_name == 'push'", create["if"])
+        guard = next(step for step in steps if step.get("name") == "Require a published release for provenance-only dispatch")
+        self.assertIn("workflow_dispatch", guard["if"])
+        validate = next(step for step in steps if step.get("name") == "Validate immutable caller and contract identities")
+        self.assertIn("workflow_dispatch", validate["run"])
+        self.assertIn('test "${GITHUB_REF_TYPE}" = "tag"', validate["run"])
+
     def test_template_release_never_claims_tag_publisher_provenance_for_a_local_call(self) -> None:
         release = yaml.safe_load((self.ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
         job = release["jobs"]["publish_immutable_candidate"]

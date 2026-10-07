@@ -149,7 +149,9 @@ jobs:
           case "${CONTRACT_SHA}" in *[!0-9a-f]*) echo "::error::contract_sha must be lowercase hex"; exit 1;; esac
           test "$(git -C contract rev-parse HEAD)" = "${CONTRACT_SHA}" || { echo "::error::contract checkout mismatch"; exit 1; }
           test "$(git -C plugin rev-parse HEAD)" = "${GITHUB_SHA}" || { echo "::error::caller source SHA mismatch"; exit 1; }
-          test "${GITHUB_EVENT_NAME}" = "push" || { echo "::error::candidate must originate from a tag push"; exit 1; }
+          # push = publish a new immutable candidate; workflow_dispatch on the tag ref =
+          # provenance only (reuse the published release, never create one).
+          case "${GITHUB_EVENT_NAME}" in push|workflow_dispatch) ;; *) echo "::error::candidate must originate from a tag push or a provenance-only dispatch on the tag"; exit 1;; esac
           test "${GITHUB_REF_TYPE}" = "tag" || { echo "::error::candidate requires an immutable tag"; exit 1; }
           test "${GITHUB_REF}" = "refs/tags/${GITHUB_REF_NAME}" || { echo "::error::candidate ref must be the pushed tag"; exit 1; }
           test "${RELEASE_TRACK}" = "main" || { echo "::error::release track must be exactly main"; exit 1; }
@@ -226,34 +228,44 @@ jobs:
               output.write("exists=true\n")
           PY
 
+      - name: Require a published release for provenance-only dispatch
+        if: github.event_name == 'workflow_dispatch' && steps.release.outputs.exists != 'true'
+        run: |
+          echo "::error::provenance-only dispatch requires an already published release for ${GITHUB_REF_NAME}"
+          exit 1
+
       - name: Build plugin ZIP exactly once
-        if: steps.release.outputs.exists != 'true'
         id: build
         run: >-
           python3 contract/scripts/ci/build_plugin_zip.py
           --plugin-root plugin
           --plugin-name "${{ steps.ini.outputs.name }}"
           --plugin-version "${{ steps.ini.outputs.version }}"
-          --output "/tmp/${{ steps.ini.outputs.name }}-v${{ steps.ini.outputs.version }}.zip"
+          --output "/tmp/build/${{ steps.ini.outputs.name }}-v${{ steps.ini.outputs.version }}.zip"
 
       - name: Create immutable GitHub Release asset
-        if: steps.release.outputs.exists != 'true'
+        if: steps.release.outputs.exists != 'true' && github.event_name == 'push'
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ steps.ini.outputs.name }} ${{ github.ref_name }}
           generate_release_notes: true
-          files: /tmp/${{ steps.ini.outputs.name }}-v${{ steps.ini.outputs.version }}.zip
+          files: /tmp/build/${{ steps.ini.outputs.name }}-v${{ steps.ini.outputs.version }}.zip
 
-      - name: Download existing immutable release asset without rebuilding
-        if: steps.release.outputs.exists == 'true'
+      - name: Download the published asset and byte-compare it with the deterministic build
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release download "${GITHUB_REF_NAME}"
-          --repo "${GITHUB_REPOSITORY}"
-          --pattern "${{ steps.ini.outputs.name }}-v${{ steps.ini.outputs.version }}.zip"
-          --dir /tmp
+          ASSET_NAME: ${{ steps.ini.outputs.name }}-v${{ steps.ini.outputs.version }}.zip
+        run: |
+          set -euo pipefail
+          # New or reused, the asset the manifest attests must be exactly the bytes the
+          # reviewed builder produces from GITHUB_SHA; a hand-uploaded or pre-staged
+          # asset fails closed here.
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "${ASSET_NAME}" \
+            --dir /tmp
+          cmp "/tmp/build/${ASSET_NAME}" "/tmp/${ASSET_NAME}" || { echo "::error::published release asset differs from the deterministic build"; exit 1; }
 
       - name: Resolve canonical GitHub Release publication timestamp
         id: release_metadata

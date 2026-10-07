@@ -9,6 +9,7 @@ import {
   canonicalJson,
   selectPublisherJob,
   selectReleaseAsset,
+  sourceEvent,
   validateManifest,
 } from './build_source_provenance_manifest.mjs'
 
@@ -154,3 +155,11 @@ for (const [name, mutate] of [
     assert.throws(() => selectReleaseAsset(value, assetQuery), ProvenanceError)
   })
 }
+
+test('accepts a tag push or a dispatch on the tag ref, never a branch or another event', () => {
+  assert.equal(sourceEvent('push', 'tag', 'refs/tags/v16.4', 'v16.4'), 'push')
+  assert.equal(sourceEvent('workflow_dispatch', 'tag', 'refs/tags/v16.4', 'v16.4'), 'workflow_dispatch')
+  assert.throws(() => sourceEvent('workflow_dispatch', 'branch', 'refs/heads/main', 'main'), ProvenanceError)
+  assert.throws(() => sourceEvent('pull_request', 'tag', 'refs/tags/v16.4', 'v16.4'), ProvenanceError)
+  assert.throws(() => sourceEvent('push', 'tag', 'refs/tags/v16.5', 'v16.4'), ProvenanceError)
+})
