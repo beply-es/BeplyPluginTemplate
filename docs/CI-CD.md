@@ -116,7 +116,10 @@ Como el POST sale del mismo run, la plataforma registra el testigo como
 run termina en `success`, la plataforma lo reverifica y lo pasa a `verified`.
 
 La plataforma lo acepta solo con una raiz `tag-publisher` que permita el SHA
-exacto de este reusable. Si no la tiene, rechaza la subida: primero se configura
+exacto de este reusable. Ademas, en el `release.yml` del plugin,
+`with.contract_sha` tiene que ser literalmente ese mismo SHA: el tooling (ZIP y
+manifiesto) se descarga de `contract_sha`, y una expresion u otro commit se
+rechazan. Si no la tiene, rechaza la subida: primero se configura
 la raiz y despues se sube el pin del plugin. Un `uses:` local (el propio
 template) nunca cumple esa raiz, asi que `release.yml` del template pasa
 `submit_source_provenance: false`. Si hace falta reintentar, se relanzan todos
