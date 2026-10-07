@@ -123,7 +123,10 @@ hace POST del mismo asset para mejorar el testigo de la version existente. Para
 usarlo, el `release.yml` del plugin **en el commit del tag** tiene que declarar
 `workflow_dispatch` y llamar ya a este reusable, y la raiz tiene que incluir
 `workflow_dispatch` en `events`. Los tags anteriores a este contrato no se
-pueden rellenar asi.
+pueden rellenar asi. Ademas, la plataforma exige hoy que el asset lo haya
+subido `github-actions[bot]` durante el propio run (`created_at >= run.created_at`).
+Por eso, un dispatch sobre una release publicada antes de ese run falla cerrado
+hasta que se decida otra cosa.
 
 Como el POST sale del mismo run, la plataforma registra el testigo como
 `pending` (el job publicador ya esta `completed/success`, el run no). Cuando el
