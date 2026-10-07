@@ -38,6 +38,10 @@ EXCLUDED_NAMES = {
 PLUGIN_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*$")
 PLUGIN_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+$")
 FIXED_ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
+# Opt-in por repositorio: subdirectorios de scripts/ que el plugin necesita en producción. Sin el
+# fichero todo scripts/ queda fuera, como siempre, así que no cambia nada para los demás plugins.
+PACKAGE_POLICY = Path(".beply/package-policy.json")
+SCRIPT_DIR_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 SUPPLY_CHAIN_LOCKS = (
     (Path("composer.lock"), Path(".beply/supply-chain/composer.lock")),
     (Path("package-lock.json"), Path(".beply/supply-chain/package-lock.json")),
@@ -49,16 +53,36 @@ class BuildError(RuntimeError):
     pass
 
 
-def is_excluded(relative_path: Path) -> bool:
+def load_package_policy(plugin_root: Path) -> frozenset[str]:
+    policy_path = plugin_root / PACKAGE_POLICY
+    if policy_path.is_symlink():
+        raise BuildError("symlinked package policy is forbidden")
+    if not policy_path.exists():
+        return frozenset()
+    try:
+        policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise BuildError("package policy is not valid JSON") from exc
+    if not isinstance(policy, dict) or set(policy) != {"schema", "includeScripts"} or policy["schema"] != 1:
+        raise BuildError("package policy must be {schema: 1, includeScripts: [...]}")
+    include = policy["includeScripts"]
+    if not isinstance(include, list) or not all(isinstance(item, str) and SCRIPT_DIR_RE.fullmatch(item) for item in include):
+        raise BuildError("package policy includeScripts must list plain scripts/ subdirectory names")
+    return frozenset(include)
+
+
+def is_excluded(relative_path: Path, include_scripts: frozenset[str] = frozenset()) -> bool:
     if not relative_path.parts:
         return False
-    if relative_path.parts[0] in EXCLUDED_ROOTS:
-        return True
     if relative_path.name == ".env":
         return True
     if relative_path.name.startswith(".env") and relative_path.name != ".env.example":
         return True
-    return relative_path.name in EXCLUDED_NAMES
+    if relative_path.name in EXCLUDED_NAMES:
+        return True
+    if relative_path.parts[0] == "scripts" and len(relative_path.parts) > 2 and relative_path.parts[1] in include_scripts:
+        return False
+    return relative_path.parts[0] in EXCLUDED_ROOTS
 
 
 def sha256_file(path: Path) -> str:
@@ -86,10 +110,11 @@ def build_plugin_zip(
     if not (plugin_root / "facturascripts.ini").is_file():
         raise BuildError("facturascripts.ini is missing")
 
+    include_scripts = load_package_policy(plugin_root)
     payload: list[tuple[Path, Path]] = []
     for path in sorted(plugin_root.rglob("*"), key=lambda item: item.as_posix()):
         relative = path.relative_to(plugin_root)
-        if is_excluded(relative):
+        if is_excluded(relative, include_scripts):
             continue
         if path.is_symlink():
             raise BuildError(f"symlinked payload entry is forbidden: {relative}")
