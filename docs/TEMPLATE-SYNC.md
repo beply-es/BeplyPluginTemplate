@@ -31,13 +31,13 @@ Solo tooling comun y contratos de trabajo:
 Dry-run:
 
 ```bash
-node scripts/template/sync-template.mjs --ref v1.4
+node scripts/template/sync-template.mjs --ref v1.5
 ```
 
 Aplicar:
 
 ```bash
-node scripts/template/sync-template.mjs --ref v1.4 --apply
+node scripts/template/sync-template.mjs --ref v1.5 --apply
 ```
 
 Usar una copia local de la plantilla:

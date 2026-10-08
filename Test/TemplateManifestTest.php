@@ -19,6 +19,21 @@ final class TemplateManifestTest extends TestCase
         $this->assertStringContainsString('min_php = 8.2', $manifest);
     }
 
+    public function testTemplateVersionLockSyncRefAndChangelogAgree(): void
+    {
+        // 1.5 lowers min_php to the 8.2 runtime; the published v1.4 tag is never moved.
+        $root = dirname(__DIR__);
+        $manifest = file_get_contents($root . '/facturascripts.ini');
+        $lock = json_decode((string) file_get_contents($root . '/.beply/template-lock.json'), true);
+        $sync = json_decode((string) file_get_contents($root . '/.beply/template-sync.json'), true);
+        $changelog = file_get_contents($root . '/CHANGELOG.md');
+
+        $this->assertMatchesRegularExpression('/^version = 1\.5$/m', (string) $manifest);
+        $this->assertSame(['1.5', 'v1.5', 'v1.5'], [$lock['version'] ?? null, $lock['ref'] ?? null, $sync['defaultRef'] ?? null]);
+        $this->assertMatchesRegularExpression('/^## v1\.5 - \d{4}-\d{2}-\d{2}$/m', (string) $changelog);
+        $this->assertStringContainsString('## v1.4 - 2026-06-17', (string) $changelog);
+    }
+
     public function testInitImplementsFacturaScriptsRuntimeContract(): void
     {
         $init = file_get_contents(dirname(__DIR__) . '/Init.php');

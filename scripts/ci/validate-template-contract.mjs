@@ -109,8 +109,17 @@ if (templateLock.template !== 'beply-es/BeplyPluginTemplate') {
 if (isTemplate && templateLock.version !== ini.version) {
   fail('template-lock version must match facturascripts.ini')
 }
+if (isTemplate && templateLock.ref !== `v${ini.version}`) {
+  fail('template-lock ref must be the tag of facturascripts.ini version')
+}
 
 const templateSync = readJson('.beply/template-sync.json')
+if (isTemplate && templateSync.defaultRef !== `v${ini.version}`) {
+  fail('template-sync defaultRef must be the tag of facturascripts.ini version')
+}
+if (isTemplate && !new RegExp(`^## v${ini.version.replace('.', '\\.')} - \\d{4}-\\d{2}-\\d{2}$`, 'm').test(readFileSync(resolve(root, 'CHANGELOG.md'), 'utf8'))) {
+  fail('CHANGELOG.md must have a dated section for the template version')
+}
 if (!Array.isArray(templateSync.overwrite) || !Array.isArray(templateSync.createIfMissing) || !Array.isArray(templateSync.neverOverwrite)) {
   fail('template-sync must declare overwrite, createIfMissing and neverOverwrite arrays')
 }

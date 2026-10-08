@@ -9,7 +9,7 @@ Plantilla base para arrancar un plugin Beply de FacturaScripts con workflow Code
 | Estado | Plantilla base |
 | Tipo | Scaffold reutilizable |
 | Nombre de plugin | `BeplyPluginTemplate` |
-| Version actual | `1.4` |
+| Version actual | `1.5` |
 | Compatibilidad declarada | `FacturaScripts 2026.2+` |
 | PHP minimo declarado | `8.2` (runtime de tenant `php:8.2-fpm-alpine`; nunca mas) |
 | Stack objetivo Beply | `FacturaScripts v2026.3 y v2026.2 / PHP 8.2`, con escaneo de compatibilidad PHP 8.4 |
@@ -58,8 +58,8 @@ La plantilla se usa al crear el plugin. Despues, el producto manda. Si se quiere
 traer mejoras comunes de la plantilla, usar solo el sync controlado:
 
 ```bash
-node scripts/template/sync-template.mjs --ref v1.4
-node scripts/template/sync-template.mjs --ref v1.4 --apply
+node scripts/template/sync-template.mjs --ref v1.5
+node scripts/template/sync-template.mjs --ref v1.5 --apply
 ```
 
 El sync actualiza CI, scripts, docs de proceso y contratos comunes. Los adapters

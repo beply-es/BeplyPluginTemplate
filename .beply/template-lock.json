@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "template": "beply-es/BeplyPluginTemplate",
-  "version": "1.4",
-  "ref": "v1.4",
+  "version": "1.5",
+  "ref": "v1.5",
   "mode": "initial-scaffold-plus-controlled-tooling-sync",
   "notes": [
     "La plantilla se usa al crear el plugin.",

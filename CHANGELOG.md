@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.5 - 2026-10-08
+
 - El candidato DEV solo sale en verde si lee de vuelta del catalogo DEV
   exactamente una fila `pending_review` para los bytes subidos y el
   `pluginId`/`versionId` devueltos. Un plugin que el catalogo DEV no conoce se
