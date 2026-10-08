@@ -8,6 +8,7 @@
     ".github/ci/setup-runtime.php",
     ".github/ci/start-local-postgres.sh",
     ".github/ci/unit-bootstrap.php",
+    ".github/ci/test_tests_workflow_triggers.py",
     ".github/workflows/tests.yml",
     "docs/AI-TOOLS-MANIFEST.md",
     "docs/CI-CD.md",
