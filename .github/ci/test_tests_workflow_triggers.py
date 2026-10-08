@@ -9,7 +9,9 @@ the run a release waits for (GitHub cancels a *pending* run in a shared
 group even with cancel-in-progress false). Draft PRs run the light job(s)
 only; ready_for_review starts the rest.
 
-Any other workflow that waits for this Tests run (a release gate) must not
+Workflow files must have no duplicate keys: GitHub rejects such a file and
+the workflow never runs. Any other workflow that waits for this Tests run (a
+release gate, its query either inline or in a script its steps run) must not
 fire where Tests no longer runs: if it runs on pushes outside the release
 branches, its waiting job needs a job-level `if` limited to tags, or it would
 hold a runner until it times out. And when it also fires on a release branch,
@@ -33,6 +35,45 @@ RELEASE_PREDICATE = re.compile("|".join(
     rf"ref_name == (?:\(vars\.BEPLY_RELEASE_BRANCH \|\| )?'{re.escape(branch)}'\)?|github\.ref == 'refs/heads/{re.escape(branch)}'"
     for branch in RELEASE_BRANCHES
 ) + r"|ref_name == \(vars\.BEPLY_RELEASE_BRANCH \|\| github\.event\.repository\.default_branch\)")
+
+
+RUN_SCRIPT = re.compile(r"(?:python3?|node|bash|sh) +(?:\./)?([\w./-]+\.(?:py|mjs|cjs|js|sh))\b")
+
+
+def with_run_scripts(text):
+    """A workflow plus the repo scripts its steps run: the Tests query may live there."""
+    root = WORKFLOW.parents[2]
+    scripts = sorted({name for name in RUN_SCRIPT.findall(text) if (root / name).is_file()})
+    return "\n".join([text] + [(root / name).read_text(encoding="utf-8", errors="replace") for name in scripts])
+
+
+def duplicate_keys(text):
+    """Keys repeated in one block mapping: GitHub rejects such a workflow file
+    ("workflow file issue") and the workflow never runs, while PyYAML keeps the last one."""
+    found, stack, scalar = [], [], None
+    for number, line in enumerate(text.splitlines(), 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if scalar is not None:
+            if indent > scalar:
+                continue
+            scalar = None
+        match = re.match(r"( *)(- +)?([A-Za-z0-9_.-]+|'[^']*'|\"[^\"]*\"):(?: +(.*))?$", line)
+        if not match:
+            continue
+        key_indent = indent + len(match.group(2) or "")
+        while stack and (stack[-1][0] > key_indent or (match.group(2) and stack[-1][0] == key_indent)):
+            stack.pop()
+        if not stack or stack[-1][0] < key_indent:
+            stack.append((key_indent, set()))
+        key = match.group(3).strip("'\"")
+        if key in stack[-1][1]:
+            found.append(f"line {number}: {key}")
+        stack[-1][1].add(key)
+        if re.match(r"[|>][-+0-9]*\s*(?:#.*)?$", match.group(4) or ""):
+            scalar = key_indent
+    return found
 
 
 def job_blocks(text):
@@ -126,10 +167,15 @@ class TestsWorkflowTriggersTest(unittest.TestCase):
                 else:
                     self.assertTrue(is_guarded(job), f"{job} would run on a draft PR")
 
+    def test_workflow_files_have_no_duplicate_keys(self):
+        for path in sorted(WORKFLOW.parent.glob("*.y*ml")):
+            with self.subTest(workflow=path.name):
+                self.assertEqual(duplicate_keys(path.read_text(encoding="utf-8")), [])
+
     def test_release_gates_waiting_for_tests_only_run_where_tests_runs(self):
         for path in sorted(WORKFLOW.parent.glob("*.y*ml")):
             text = path.read_text(encoding="utf-8")
-            if path == WORKFLOW or not WAITS_FOR_TESTS.search(text):
+            if path == WORKFLOW or not WAITS_FOR_TESTS.search(with_run_scripts(text)):
                 continue
             branches = push_branches(text)
             outside = [branch for branch in branches if branch not in RELEASE_BRANCHES]
@@ -137,7 +183,7 @@ class TestsWorkflowTriggersTest(unittest.TestCase):
                 fnmatch.fnmatchcase(release, branch) for branch in branches for release in RELEASE_BRANCHES
             )
             for job, block in job_blocks(text).items():
-                if not WAITS_FOR_TESTS.search(block):
+                if not WAITS_FOR_TESTS.search(with_run_scripts(block)):
                     continue
                 condition = job_if(block)
                 with self.subTest(workflow=path.name, job=job):
