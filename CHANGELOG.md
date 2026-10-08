@@ -17,6 +17,10 @@
   bytes, tag y source SHA.
 - Convierte los workflows del template en adapters finos y evita que el sync
   sobrescriba adapters de release existentes durante la migracion de plugins.
+- `min_php` vuelve a 8.2, el runtime de tenant (`php:8.2-fpm-alpine`): con 8.4 el
+  backend rechaza toda release (`PLUGIN_MIN_PHP_EXCEEDS_RUNTIME`) y los plugins
+  creados desde la plantilla lo heredaban. La CI prueba en 8.2 y el escaneo PHP 8.4
+  queda como compatibilidad que no bloquea. El contrato exige `min_php` <= 8.2.
 
 ## v1.4 - 2026-06-17
 

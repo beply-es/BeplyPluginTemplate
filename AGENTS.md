@@ -18,7 +18,7 @@ Si el plugin es una reimplementacion visual de otro modulo, leer tambien `docs/R
 ## Reglas de trabajo
 
 - Confirmar la matriz de FacturaScripts antes de desarrollar. La base esta en `.beply/facturascripts-matrix.json`.
-- Por defecto se prueba `v2026.3` y `v2026.2` con PHP 8.4. Si sale una version nueva, anadirla al JSON y a CI antes de validar.
+- Por defecto se prueba `v2026.3` y `v2026.2` con PHP 8.2, el runtime de tenant (`php:8.2-fpm-alpine`); `min_php` no puede superarlo porque el backend rechaza la release (`PLUGIN_MIN_PHP_EXCEEDS_RUNTIME`). PHP 8.4 se escanea como compatibilidad, sin bloquear. Si sale una version nueva de FacturaScripts, anadirla al JSON y a CI antes de validar.
 - No dar por terminado ningun cambio si falta test unitario, runtime o E2E de navegador para la funcionalidad afectada.
 - Toda pantalla debe tener matriz de cobertura en `docs/testing/ui-coverage-matrix.json`. Si hay 50 botones visibles, los 50 deben estar cubiertos.
 - Si el cambio modifica una ficha/listado/flujo de usuario, actualizar `docs/user/`, `docs/docs-sync/impact-map.json` y las referencias a documentacion base.

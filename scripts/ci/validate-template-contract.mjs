@@ -86,8 +86,14 @@ if (isTemplate) {
 if (!/^\d+\.\d+$/.test(ini.version || '')) {
   fail('facturascripts.ini version must use X.Y format')
 }
-if (ini.min_php !== '8.4') {
-  fail('facturascripts.ini min_php must be 8.4')
+// The tenant runtime is php:8.2-fpm-alpine; the backend refuses a release
+// whose min_php exceeds it (PLUGIN_MIN_PHP_EXCEEDS_RUNTIME).
+const RUNTIME_PHP = [8, 2]
+const minPhp = /^(\d+)\.(\d+)$/.exec(ini.min_php || '')
+if (!minPhp) {
+  fail('facturascripts.ini min_php must use X.Y format')
+} else if (Number(minPhp[1]) > RUNTIME_PHP[0] || (Number(minPhp[1]) === RUNTIME_PHP[0] && Number(minPhp[2]) > RUNTIME_PHP[1])) {
+  fail(`facturascripts.ini min_php must not exceed the tenant runtime PHP ${RUNTIME_PHP.join('.')}`)
 }
 
 const matrix = readJson('.beply/facturascripts-matrix.json')

@@ -935,3 +935,47 @@ class ReusableWorkflowToolingTests(unittest.TestCase):
                         body,
                         f"{path.name}: se declara SHA-256 pero no se verifica",
                     )
+
+
+class RuntimePhpContractTests(unittest.TestCase):
+    """El runtime de tenant es `php:8.2-fpm-alpine` (beply-k3s
+    docker-build/facturascripts-runtime). El backend rechaza una release cuyo
+    `min_php` supera ese runtime (PLUGIN_MIN_PHP_EXCEEDS_RUNTIME), asi que el
+    plugin no puede exigir mas, y la CI tiene que probar en esa version. PHP 8.4
+    se vigila como compatibilidad hacia delante, sin bloquear.
+    """
+
+    ROOT = Path(__file__).resolve().parents[2]
+    RUNTIME_PHP = (8, 2)
+
+    def _jobs(self):
+        return yaml.safe_load((self.ROOT / ".github/workflows/tests.yml").read_text(encoding="utf-8"))["jobs"]
+
+    def test_manifest_never_requires_more_php_than_the_runtime(self) -> None:
+        ini = (self.ROOT / "facturascripts.ini").read_text(encoding="utf-8")
+        match = re.search(r"(?m)^min_php\s*=\s*['\"]?(\d+)\.(\d+)['\"]?\s*$", ini)
+        self.assertIsNotNone(match, "facturascripts.ini must declare min_php as X.Y")
+        self.assertLessEqual((int(match.group(1)), int(match.group(2))), self.RUNTIME_PHP)
+
+    def test_ci_tests_on_the_runtime_php(self) -> None:
+        jobs = self._jobs()
+        runtime = "%d.%d" % self.RUNTIME_PHP
+        for name in ("unit", "runtime"):
+            with self.subTest(job=name):
+                self.assertEqual(jobs[name]["strategy"]["matrix"]["php-version"], [runtime])
+        for name in ("lint", "e2e"):
+            with self.subTest(job=name):
+                setup = next(step for step in jobs[name]["steps"] if str(step.get("uses", "")).startswith("shivammathur/setup-php@"))
+                self.assertEqual(str(setup["with"]["php-version"]), runtime)
+        workflow = (self.ROOT / ".github/workflows/tests.yml").read_text(encoding="utf-8")
+        self.assertFalse("platform.php 8.4" in workflow, "composer must resolve for the runtime PHP")
+        self.assertEqual(workflow.count("composer config platform.php"), workflow.count(f"composer config platform.php {runtime}.0"))
+        unit = next(step for step in jobs["unit"]["steps"] if step.get("name") == "Run PHPUnit unit suite")
+        self.assertIn(f"matrix.php-version == '{runtime}'", unit["if"], "the unit suite must run on the runtime PHP")
+
+    def test_php84_scan_is_forward_compatibility_and_never_blocks(self) -> None:
+        job = self._jobs()["php84_compat"]
+        self.assertIs(job.get("continue-on-error"), True)
+        setup = next(step for step in job["steps"] if str(step.get("uses", "")).startswith("shivammathur/setup-php@"))
+        self.assertEqual(str(setup["with"]["php-version"]), "8.4")
+

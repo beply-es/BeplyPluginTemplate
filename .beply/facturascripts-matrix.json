@@ -3,18 +3,18 @@
   "verifiedAt": "2026-06-09",
   "source": "https://packagist.org/packages/facturascripts/facturascripts",
   "defaultRef": "v2026.3",
-  "phpVersions": ["8.4"],
+  "phpVersions": ["8.2"],
   "supported": [
     {
       "ref": "v2026.3",
       "role": "latest",
-      "php": "8.4",
+      "php": "8.2",
       "required": true
     },
     {
       "ref": "v2026.2",
       "role": "previous",
-      "php": "8.4",
+      "php": "8.2",
       "required": true
     }
   ],

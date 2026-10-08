@@ -60,9 +60,12 @@ jobs:
         run: node scripts/ci/validate-docs-impact.mjs
 
   php84_compat:
+    # Forward compatibility only: the tenant runtime is PHP 8.2 and the plugin
+    # must not require more, so a PHP 8.4 finding is a warning, not a gate.
     name: PHP 8.4 Compatibility
     needs: quality_contract
     timeout-minutes: 10
+    continue-on-error: true
     if: github.event.pull_request.draft != true
     runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-24.04' }}
 
@@ -107,7 +110,7 @@ jobs:
       - name: Setup PHP
         uses: shivammathur/setup-php@accd6127cb78bee3e8082180cb391013d204ef9f # 2.37.0
         with:
-          php-version: '8.4'
+          php-version: '8.2'
           coverage: none
 
       - name: Lint PHP sources
@@ -136,7 +139,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php-version: ['8.4']
+        php-version: ['8.2']
         facturascripts-ref: ['v2026.3', 'v2026.2']
 
     steps:
@@ -163,7 +166,7 @@ jobs:
       - name: Install Composer dependencies
         working-directory: facturascripts
         run: |
-          composer config platform.php 8.4.0
+          composer config platform.php 8.2.0
           composer install --no-interaction --prefer-dist
 
       - name: Prepare config.php
@@ -214,7 +217,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Run PHPUnit unit suite
-        if: steps.unit-targets.outputs.has_tests == 'true' && matrix.php-version == '8.4'
+        if: steps.unit-targets.outputs.has_tests == 'true' && matrix.php-version == '8.2'
         working-directory: facturascripts
         run: |
           php -d memory_limit=512M vendor/bin/phpunit \
@@ -244,7 +247,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php-version: ['8.4']
+        php-version: ['8.2']
         facturascripts-ref: ['v2026.3', 'v2026.2']
 
     steps:
@@ -289,7 +292,7 @@ jobs:
         if: steps.runtime-targets.outputs.has_tests == 'true'
         working-directory: facturascripts
         run: |
-          composer config platform.php 8.4.0
+          composer config platform.php 8.2.0
           composer install --no-interaction --prefer-dist
 
       - name: Start local PostgreSQL
@@ -380,7 +383,7 @@ jobs:
       - name: Setup PHP
         uses: shivammathur/setup-php@accd6127cb78bee3e8082180cb391013d204ef9f # 2.37.0
         with:
-          php-version: '8.4'
+          php-version: '8.2'
           extensions: bcmath, gd, mbstring, intl, zip, curl, pgsql, pdo_pgsql
           coverage: none
 
@@ -407,7 +410,7 @@ jobs:
         if: steps.e2e-targets.outputs.has_tests == 'true'
         working-directory: facturascripts
         run: |
-          composer config platform.php 8.4.0
+          composer config platform.php 8.2.0
           composer install --no-interaction --prefer-dist
 
       - name: Install core frontend dependencies
