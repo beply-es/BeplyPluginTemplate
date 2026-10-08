@@ -8,6 +8,11 @@ ref, SHA), so a newer main or tag push never cancels, queues or serialises
 the run a release waits for (GitHub cancels a *pending* run in a shared
 group even with cancel-in-progress false). Draft PRs run the light job(s)
 only; ready_for_review starts the rest.
+
+Any other workflow that waits for this Tests run (a release gate) must not
+fire where Tests no longer runs: if it runs on pushes outside the release
+branches, its waiting job needs a job-level `if` limited to tags (and the
+release branch), or it would hold a runner until it times out.
 """
 import re
 import unittest
@@ -17,6 +22,10 @@ WORKFLOW = Path(__file__).resolve().parents[1] / "workflows" / "tests.yml"
 RELEASE_BRANCHES = ["main"]
 LIGHT_JOBS = {"quality_contract"}
 DRAFT_GUARD = "github.event.pull_request.draft != true"
+WAITS_FOR_TESTS = re.compile(
+    r"""(?:\.get\(\s*["']name["']\s*\)|\[["']name["']\])\s*==\s*["']Tests["']|wait_for_tests\.py"""
+)
+TAG_PREDICATE = re.compile(r"refs/tags/|ref_type == 'tag'")
 
 
 def job_blocks(text):
@@ -27,6 +36,21 @@ def job_blocks(text):
 def job_if(block):
     match = re.search(r"^    if: *(.*)$", block, re.M)
     return match.group(1) if match else ""
+
+
+def push_branches(text):
+    head = text.split("\njobs:\n", 1)[0]
+    push = re.search(r"^  push:(.*)\n((?:    .*\n|      .*\n)*)", head, re.M)
+    if not push:
+        return []
+    body = push.group(2)
+    inline = re.search(r"^    branches: *\[(.*)\]", body, re.M)
+    if inline:
+        return [item.strip().strip("'\"") for item in inline.group(1).split(",") if item.strip()]
+    listed = re.search(r"^    branches:\n((?:      - .*\n)+)", body, re.M)
+    if listed:
+        return [line.strip()[2:].strip().strip("'\"") for line in listed.group(1).splitlines()]
+    return [] if re.search(r"^    tags:", body, re.M) else ["**"]
 
 
 def needs_of(block):
@@ -92,6 +116,19 @@ class TestsWorkflowTriggersTest(unittest.TestCase):
                     self.assertFalse(any(is_guarded(need) for need in needs_of(self.jobs[job])))
                 else:
                     self.assertTrue(is_guarded(job), f"{job} would run on a draft PR")
+
+    def test_release_gates_waiting_for_tests_only_run_where_tests_runs(self):
+        for path in sorted(WORKFLOW.parent.glob("*.y*ml")):
+            text = path.read_text(encoding="utf-8")
+            if path == WORKFLOW or not WAITS_FOR_TESTS.search(text):
+                continue
+            if set(push_branches(text)) <= set(RELEASE_BRANCHES):
+                continue
+            for job, block in job_blocks(text).items():
+                if WAITS_FOR_TESTS.search(block):
+                    with self.subTest(workflow=path.name, job=job):
+                        self.assertRegex(job_if(block), TAG_PREDICATE,
+                                         f"{job} waits for Tests on every branch push")
 
 
 if __name__ == "__main__":
