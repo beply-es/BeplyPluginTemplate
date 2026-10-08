@@ -2,9 +2,12 @@
 
 push runs only on the release branch(es) and v* tags: the release gate waits
 for the Tests run of exactly that ref and event, so those stay. Feature
-branches get their single run from pull_request. Only PR runs cancel each
-other: a newer main or tag push must never cancel the run a release waits
-for. Draft PRs run the light job(s) only; ready_for_review starts the rest.
+branches get their single run from pull_request. Only PR runs share a group
+and cancel each other; every push/dispatch run gets its own group (event,
+ref, SHA), so a newer main or tag push never cancels, queues or serialises
+the run a release waits for (GitHub cancels a *pending* run in a shared
+group even with cancel-in-progress false). Draft PRs run the light job(s)
+only; ready_for_review starts the rest.
 """
 import re
 import unittest
@@ -59,7 +62,9 @@ class TestsWorkflowTriggersTest(unittest.TestCase):
     def test_only_pull_request_runs_cancel_each_other(self):
         self.assertRegex(
             self.head,
-            r"\nconcurrency:\n  group: [^\n]*\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}\n"
+            r"\nconcurrency:\n  group: [^\n]*\$\{\{ github\.event_name == 'pull_request' && format\('pr-\{0\}', "
+            r"github\.event\.pull_request\.number\) \|\| format\('\{0\}-\{1\}-\{2\}', github\.event_name, github\.ref, "
+            r"github\.sha\) \}\}\n"
             r"  cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}\n",
         )
 

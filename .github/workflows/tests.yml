@@ -18,7 +18,7 @@ env:
   PLUGIN_FOLDER: ${{ github.event.repository.name }}
 
 concurrency:
-  group: plugin-tests-${{ github.event.repository.name }}-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: plugin-tests-${{ github.event.repository.name }}-${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('{0}-{1}-{2}', github.event_name, github.ref, github.sha) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
