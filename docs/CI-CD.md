@@ -59,7 +59,16 @@ Variables recomendadas:
 - tag/version coherente;
 - SHA exacto del contrato reutilizable;
 - un unico build o reutilizacion del release existente;
-- checksum, bytes, UUID y estado `pending_review` de DEV.
+- checksum, bytes, UUID y estado `pending_review` de DEV;
+- lectura de vuelta, en el mismo paso que la subida, de exactamente una fila
+  `pending-releases` de DEV con el repo, tag, slug, version, SHA-256 y bytes
+  enviados y el `pluginId`/`versionId` devueltos. La respuesta del POST no
+  prueba la fila;
+- antes de subir nada, que el plugin ya exista en el catalogo DEV: su release
+  anterior `vX.Y` tiene que responder en `release-witness`. Un plugin nuevo
+  (sin release anterior o sin esa version en DEV) falla cerrado sin POST: su
+  alta va por la ingesta canonica de k3s (`dev/prod-plugin-artifact-ingest.yml`).
+  Cualquier otra respuesta del catalogo es un error de lectura, nunca "nuevo".
 
 `Promote Immutable Plugin To PROD` exige:
 
