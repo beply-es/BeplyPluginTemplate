@@ -11,9 +11,12 @@ only; ready_for_review starts the rest.
 
 Any other workflow that waits for this Tests run (a release gate) must not
 fire where Tests no longer runs: if it runs on pushes outside the release
-branches, its waiting job needs a job-level `if` limited to tags (and the
-release branch), or it would hold a runner until it times out.
+branches, its waiting job needs a job-level `if` limited to tags, or it would
+hold a runner until it times out. And when it also fires on a release branch,
+any such `if` must still admit that branch, or the release-branch jobs that
+need it (DEV candidate uploads) would be skipped without a red.
 """
+import fnmatch
 import re
 import unittest
 from pathlib import Path
@@ -26,6 +29,10 @@ WAITS_FOR_TESTS = re.compile(
     r"""(?:\.get\(\s*["']name["']\s*\)|\[["']name["']\])\s*==\s*["']Tests["']|wait_for_tests\.py"""
 )
 TAG_PREDICATE = re.compile(r"refs/tags/|ref_type == 'tag'")
+RELEASE_PREDICATE = re.compile("|".join(
+    rf"ref_name == (?:\(vars\.BEPLY_RELEASE_BRANCH \|\| )?'{re.escape(branch)}'\)?|github\.ref == 'refs/heads/{re.escape(branch)}'"
+    for branch in RELEASE_BRANCHES
+) + r"|ref_name == \(vars\.BEPLY_RELEASE_BRANCH \|\| github\.event\.repository\.default_branch\)")
 
 
 def job_blocks(text):
@@ -39,7 +46,9 @@ def job_if(block):
 
 
 def push_branches(text):
-    head = text.split("\njobs:\n", 1)[0]
+    head = text.split("\njobs:\n", 1)[0] + "\n"
+    if re.search(r"^on: *(?:push|\[[^\]]*\bpush\b[^\]]*\])\s*$", head, re.M):
+        return ["**"]
     push = re.search(r"^  push:(.*)\n((?:    .*\n|      .*\n)*)", head, re.M)
     if not push:
         return []
@@ -122,13 +131,21 @@ class TestsWorkflowTriggersTest(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             if path == WORKFLOW or not WAITS_FOR_TESTS.search(text):
                 continue
-            if set(push_branches(text)) <= set(RELEASE_BRANCHES):
-                continue
+            branches = push_branches(text)
+            outside = [branch for branch in branches if branch not in RELEASE_BRANCHES]
+            on_release = any(
+                fnmatch.fnmatchcase(release, branch) for branch in branches for release in RELEASE_BRANCHES
+            )
             for job, block in job_blocks(text).items():
-                if WAITS_FOR_TESTS.search(block):
-                    with self.subTest(workflow=path.name, job=job):
-                        self.assertRegex(job_if(block), TAG_PREDICATE,
-                                         f"{job} waits for Tests on every branch push")
+                if not WAITS_FOR_TESTS.search(block):
+                    continue
+                condition = job_if(block)
+                with self.subTest(workflow=path.name, job=job):
+                    if outside:
+                        self.assertRegex(condition, TAG_PREDICATE, f"{job} waits for Tests on every branch push")
+                    if on_release and condition:
+                        self.assertRegex(condition, RELEASE_PREDICATE,
+                                         f"{job} would skip the release branch and the jobs that need it")
 
 
 if __name__ == "__main__":
