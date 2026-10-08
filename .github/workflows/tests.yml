@@ -3,10 +3,11 @@ name: Tests
 on:
   push:
     branches:
-      - '**'
+      - main
     tags:
       - 'v*'
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 env:
@@ -17,8 +18,8 @@ env:
   PLUGIN_FOLDER: ${{ github.event.repository.name }}
 
 concurrency:
-  group: plugin-tests-${{ github.event.repository.name }}-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: plugin-tests-${{ github.event.repository.name }}-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -49,6 +50,9 @@ jobs:
       - name: Unit test immutable plugin artifact contract
         run: python3 -m unittest scripts/ci/test_immutable_plugin_contract.py
 
+      - name: Unit test one Tests run per SHA and draft PR gating
+        run: python3 .github/ci/test_tests_workflow_triggers.py
+
       - name: Unit test source provenance manifest contract
         run: node --test scripts/ci/test_source_provenance_manifest.mjs
 
@@ -59,6 +63,7 @@ jobs:
     name: PHP 8.4 Compatibility
     needs: quality_contract
     timeout-minutes: 10
+    if: github.event.pull_request.draft != true
     runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-24.04' }}
 
     steps:
@@ -78,6 +83,7 @@ jobs:
     name: Lint FS ${{ matrix.facturascripts-ref }}
     needs: quality_contract
     timeout-minutes: 10
+    if: github.event.pull_request.draft != true
     runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-24.04' }}
     strategy:
       fail-fast: false
