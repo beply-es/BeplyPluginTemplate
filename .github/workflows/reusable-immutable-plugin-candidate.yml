@@ -444,6 +444,11 @@ jobs:
           test -n "${BEPLY_CI_TOKEN}" || { echo "::error::BEPLY_DEV_CI_TOKEN is required"; exit 1; }
           ZIP="/tmp/${PLUGIN_NAME}-v${PLUGIN_VERSION}.zip"
           test "${{ steps.attestation.outputs.artifact_checksum }}" = "${CHECKSUM}" || { echo "::error::DEV attestation checksum drift"; exit 1; }
+          # The catalog row is read back against the bytes actually sent.
+          SHA256_HEX="$(sha256sum "${ZIP}" | awk '{print $1}')"
+          ZIP_BYTES="$(stat -c %s "${ZIP}")"
+          test "sha256:${SHA256_HEX}" = "${CHECKSUM}" || { echo "::error::DEV upload bytes differ from the measured release asset"; exit 1; }
+          test "${ZIP_BYTES}" = "${FILE_SIZE}" || { echo "::error::DEV upload size differs from the measured release asset"; exit 1; }
           CURL_FIELDS=(
             -F "file=@${ZIP}"
             -F "sourceRepoFullName=${GITHUB_REPOSITORY}"
@@ -497,6 +502,24 @@ jobs:
           case "${CANDIDATE_KIND}" in
             plugin_version)
               test -n "${PLUGIN_ID}" && test -n "${VERSION_ID}" || { echo "::error::DEV version candidate identity missing"; exit 1; }
+              # Sink readback: the POST response is the emitter describing
+              # itself. Green only when the DEV catalog holds EXACTLY ONE
+              # pending row for these bytes and this upload's identity.
+              PENDING_JSON="$(curl -sSf \
+                -H "Authorization: Bearer ${BEPLY_CI_TOKEN}" \
+                "${BEPLY_API_URL}/api/v1/plugins/pending-releases")"
+              MATCHES="$(jq \
+                --arg repo "${GITHUB_REPOSITORY}" \
+                --arg tag "${GITHUB_REF_NAME}" \
+                --arg slug "${PLUGIN_NAME}" \
+                --arg version "${PLUGIN_VERSION}" \
+                --arg checksum "sha256:${SHA256_HEX}" \
+                --arg size "${ZIP_BYTES}" \
+                --arg pluginId "${PLUGIN_ID}" \
+                --arg versionId "${VERSION_ID}" \
+                '[.data.releases[]? | select((((.sourceRepoFullName // "") | ascii_downcase) == ($repo | ascii_downcase)) and ((.sourceReleaseTag // "") == $tag) and (((.pluginSlug // "") | ascii_downcase) == ($slug | ascii_downcase)) and ((.version // "") == $version) and ((.checksum // "") == $checksum) and (((.fileSize // -1) | tostring) == $size) and ((.pluginId // "") == $pluginId) and ((.versionId // "") == $versionId))] | length' \
+                <<<"${PENDING_JSON}")"
+              test "${MATCHES}" = "1" || { echo "::error::DEV readback expected exactly 1 pending row for ${GITHUB_REPOSITORY}@${GITHUB_REF_NAME} ${PLUGIN_NAME} ${PLUGIN_VERSION} sha256:${SHA256_HEX} (${ZIP_BYTES} bytes) versionId ${VERSION_ID}; found ${MATCHES}. If an admin approved it mid-run, verify the catalog; otherwise the row is missing."; exit 1; }
               EVIDENCE="$(jq -cn \
                 --arg schemaVersion 'beply.plugin.candidate.v1' \
                 --arg candidateKind 'version' \
@@ -511,18 +534,11 @@ jobs:
                 '{schemaVersion:$schemaVersion,candidateKind:$candidateKind,pluginName:$pluginName,version:$version,pluginId:$pluginId,versionId:$versionId,checksum:$checksum,fileSize:$fileSize,releaseTag:$releaseTag,sourceSha:$sourceSha}')"
               ;;
             plugin_submission)
-              test -n "${SUBMISSION_ID}" || { echo "::error::DEV submission candidate identity missing"; exit 1; }
-              EVIDENCE="$(jq -cn \
-                --arg schemaVersion 'beply.plugin.submission-candidate.v1' \
-                --arg candidateKind 'submission' \
-                --arg pluginName "${PLUGIN_NAME}" \
-                --arg version "${PLUGIN_VERSION}" \
-                --arg submissionId "${SUBMISSION_ID}" \
-                --arg checksum "${CHECKSUM}" \
-                --argjson fileSize "${FILE_SIZE}" \
-                --arg releaseTag "${GITHUB_REF_NAME}" \
-                --arg sourceSha "${GITHUB_SHA}" \
-                '{schemaVersion:$schemaVersion,candidateKind:$candidateKind,pluginName:$pluginName,version:$version,submissionId:$submissionId,checksum:$checksum,fileSize:$fileSize,releaseTag:$releaseTag,sourceSha:$sourceSha}')"
+              # A submission is not a catalog row: there is nothing pending to
+              # read back, so this candidate cannot go green. DEV100 needs a
+              # versionId anyway; the plugin must exist in the DEV catalog first.
+              echo "::error::DEV created plugin submission ${SUBMISSION_ID} instead of a catalog version; a submission has no pending catalog row to read back, so the candidate fails closed"
+              exit 1
               ;;
             *)
               echo "::error::DEV candidate kind is missing or unsupported"

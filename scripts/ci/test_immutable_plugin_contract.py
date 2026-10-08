@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import subprocess
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -220,7 +222,7 @@ class ImmutableIdentityTests(unittest.TestCase):
                 self.assertNotIn("sourcePublishedAt=$(date -u", workflow)
                 self.assertNotIn("SOURCE_PUBLISHED_AT_EFFECTIVE", workflow)
 
-    def test_candidate_uploads_accept_initial_plugin_submissions(self) -> None:
+    def test_prod_promotion_accepts_initial_plugin_submissions(self) -> None:
         dev_workflow = (
             Path(__file__).resolve().parents[2]
             / ".github/workflows/reusable-immutable-plugin-candidate.yml"
@@ -234,8 +236,10 @@ class ImmutableIdentityTests(unittest.TestCase):
             self.assertIn("plugin_version)", workflow)
             self.assertIn("plugin_submission)", workflow)
             self.assertIn("submission_id=${SUBMISSION_ID}", workflow)
-        self.assertIn("beply.plugin.submission-candidate.v1", dev_workflow)
         self.assertIn("beply.plugin.prod-submission-candidate.v1", prod_workflow)
+        # A DEV submission has no catalog row to read back: it fails closed
+        # (DevCandidateCatalogReadbackTests), so it never emits evidence.
+        self.assertNotIn("beply.plugin.submission-candidate.v1", dev_workflow)
 
 
 class DeterministicPluginZipTests(unittest.TestCase):
@@ -517,6 +521,219 @@ class SourceProvenanceCarrierTests(unittest.TestCase):
         job = release["jobs"]["publish_immutable_candidate"]
         self.assertTrue(job["uses"].startswith("./"))
         self.assertIs(job["with"]["submit_source_provenance"], False)
+
+
+class DevCandidateCatalogReadbackTests(unittest.TestCase):
+    """La respuesta del POST es el emisor hablando de si mismo, no el catalogo.
+
+    `upload_dev` solo puede salir en verde si, en el mismo paso, lee de vuelta
+    del catalogo DEV exactamente una fila `pending_review` para los bytes
+    enviados y la identidad que devolvio la subida. Se ejecuta el cuerpo real
+    del paso con `curl` sustituido por fixtures; jq, sha256sum y stat son reales.
+    """
+
+    ROOT = Path(__file__).resolve().parents[2]
+    REPOSITORY = "beply-es/ReadbackFixture"
+    TAG = "v1.0"
+    VERSION = "1.0"
+    PLUGIN_ID = "33333333-3333-4333-8333-333333333333"
+    VERSION_ID = "44444444-4444-4444-8444-444444444444"
+    SUBMISSION_ID = "55555555-5555-4555-8555-555555555555"
+    FAKE_CURL = """#!/bin/sh
+printf '%s\\n' "$*" >> "$CALLS"
+case "$*" in
+  *"-X POST"*)
+    cat "$POST_BODY_FILE"
+    printf '\\n%s' "$POST_CODE"
+    ;;
+  *)
+    if [ "$GET_CODE" != "200" ]; then
+      echo "curl: (22) The requested URL returned error: $GET_CODE" >&2
+      exit 22
+    fi
+    cat "$PENDING_FILE"
+    ;;
+esac
+"""
+
+    def _step(self):
+        path = self.ROOT / ".github/workflows/reusable-immutable-plugin-candidate.yml"
+        publish = yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"]["publish"]
+        return publish, next(step for step in publish["steps"] if step.get("id") == "upload_dev")
+
+    def _script(self, attested_checksum: str) -> str:
+        values = {
+            "steps.attestation.outputs.artifact_checksum": attested_checksum,
+            "steps.attestation.outputs.artifact_signature": "fixture-signature",
+            "steps.attestation.outputs.artifact_signature_key_id": "fixture-key",
+            "steps.attestation.outputs.sbom_url": "plugins/dev/fixture.sbom.json",
+            "steps.attestation.outputs.sbom_checksum": "sha256:" + "f" * 64,
+            "steps.attestation.outputs.artifact_policy_version": "fixture-policy",
+        }
+
+        def render(match: re.Match) -> str:
+            self.assertIn(match.group(1), values, "unrendered workflow expression in upload_dev")
+            return values[match.group(1)]
+
+        return re.sub(r"\$\{\{\s*([^}]+?)\s*\}\}", render, self._step()[1]["run"])
+
+    def _run(self, rows=None, *, kind="plugin_version", post_code="201", get_code="200",
+             pending=None, checksum=None, file_size=None, attestation="false", provenance="false"):
+        name = "ReadbackFixture" + uuid.uuid4().hex[:12]
+        payload = b"PK\x03\x04 immutable fixture bytes"
+        asset = Path("/tmp") / f"{name}-v{self.VERSION}.zip"
+        asset.write_bytes(payload)
+        self.addCleanup(asset.unlink, missing_ok=True)
+        actual = "sha256:" + hashlib.sha256(payload).hexdigest()
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        directory = Path(scratch.name)
+        curl = directory / "curl"
+        curl.write_text(self.FAKE_CURL)
+        curl.chmod(0o700)
+        exact = {
+            "versionId": self.VERSION_ID,
+            "pluginId": self.PLUGIN_ID,
+            "pluginSlug": name.lower(),
+            "version": self.VERSION,
+            "sourceRepoFullName": self.REPOSITORY,
+            "sourceReleaseTag": self.TAG,
+            "checksum": actual,
+            "fileSize": len(payload),
+            "releaseStatus": "pending_review",
+        }
+        rows = [exact] if rows is None else [{**exact, **row} for row in rows]
+        (directory / "pending.json").write_text(
+            pending if pending is not None else json.dumps({"success": True, "data": {"releases": rows, "total": len(rows)}})
+        )
+        data = {"kind": kind, "version": self.VERSION, "releaseStatus": "pending_review"}
+        data.update({"pluginId": self.PLUGIN_ID, "versionId": self.VERSION_ID} if kind == "plugin_version"
+                    else {"submissionId": self.SUBMISSION_ID})
+        (directory / "post.json").write_text(json.dumps({"success": True, "data": data}))
+        for name_ in ("calls", "output", "summary"):
+            (directory / name_).write_text("")
+        declared = checksum or actual
+        env = {
+            "PATH": f"{directory}{os.pathsep}/usr/bin:/bin",
+            "CALLS": str(directory / "calls"),
+            "POST_BODY_FILE": str(directory / "post.json"),
+            "POST_CODE": post_code,
+            "GET_CODE": get_code,
+            "PENDING_FILE": str(directory / "pending.json"),
+            "BEPLY_API_URL": "https://dev.fixture.invalid",
+            "BEPLY_CI_TOKEN": "fixture-token",
+            "PLUGIN_NAME": name,
+            "PLUGIN_VERSION": self.VERSION,
+            "CHECKSUM": declared,
+            "FILE_SIZE": str(file_size if file_size is not None else len(payload)),
+            "RELEASE_TRACK": "main",
+            "HAS_ATTESTATION": attestation,
+            "SOURCE_PUBLISHED_AT": "2026-10-08T00:00:00Z",
+            "SUBMIT_SOURCE_PROVENANCE": provenance,
+            "SOURCE_PROVENANCE_ENVIRONMENT": "dev",
+            "MANIFEST_ARTIFACT_ID": "7",
+            "PUBLISHER_JOB_ID": "8",
+            "GITHUB_REPOSITORY": self.REPOSITORY,
+            "GITHUB_REF_NAME": self.TAG,
+            "GITHUB_SHA": "e" * 40,
+            "GITHUB_RUN_ID": "5",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_OUTPUT": str(directory / "output"),
+            "GITHUB_STEP_SUMMARY": str(directory / "summary"),
+        }
+        result = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-e", "-c", self._script(declared)],
+            env=env, capture_output=True, text=True, check=False, timeout=60,
+        )
+        calls = (directory / "calls").read_text().splitlines()
+        return result, calls, (directory / "output").read_text(), exact
+
+    def test_exactly_one_matching_pending_row_is_the_only_green(self) -> None:
+        for attestation, provenance in (("false", "false"), ("true", "true")):
+            with self.subTest(attestation=attestation, provenance=provenance):
+                result, calls, output, _ = self._run(attestation=attestation, provenance=provenance)
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                self.assertEqual(len(calls), 2)
+                self.assertIn("-X POST", calls[0])
+                self.assertIn("https://dev.fixture.invalid/api/v1/plugins/release", calls[0])
+                self.assertNotIn("-X POST", calls[1])
+                self.assertIn("Authorization: Bearer fixture-token", calls[1])
+                self.assertTrue(calls[1].endswith("https://dev.fixture.invalid/api/v1/plugins/pending-releases"))
+                self.assertIn("candidate_kind=plugin_version\n", output)
+                self.assertIn(f"version_id={self.VERSION_ID}\n", output)
+
+    def test_unrelated_rows_and_identity_casing_do_not_change_the_witness(self) -> None:
+        unrelated = {"versionId": "66666666-6666-4666-8666-666666666666", "version": "0.9", "sourceReleaseTag": "v0.9"}
+        for rows in ([{}, unrelated], [{"sourceRepoFullName": self.REPOSITORY.upper()}]):
+            with self.subTest(rows=rows):
+                result, _, output, _ = self._run(rows)
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                self.assertIn("candidate_kind=plugin_version\n", output)
+
+    def test_missing_duplicate_or_foreign_rows_fail_closed(self) -> None:
+        foreign = {
+            "sourceRepoFullName": "beply-es/OtherPlugin",
+            "sourceReleaseTag": "v1.1",
+            "pluginSlug": "otherplugin",
+            "version": "1.1",
+            "checksum": "sha256:" + "0" * 64,
+            "fileSize": 1,
+            "pluginId": "77777777-7777-4777-8777-777777777777",
+            "versionId": "88888888-8888-4888-8888-888888888888",
+        }
+        cases = {"no row": [], "duplicate row": [{}, {}]}
+        cases.update({f"foreign {field}": [{field: value}] for field, value in foreign.items()})
+        cases["missing versionId"] = [{"versionId": None}]
+        for label, rows in cases.items():
+            with self.subTest(case=label):
+                result, calls, output, _ = self._run(rows)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("expected exactly 1 pending row", result.stdout)
+                self.assertEqual(len(calls), 2)
+                self.assertNotIn("candidate_kind=", output)
+
+    def test_submission_has_no_catalog_row_and_fails_closed(self) -> None:
+        result, calls, output, _ = self._run(kind="plugin_submission")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("submission", result.stdout)
+        self.assertEqual(len(calls), 1, "a submission must not be reported through any later read")
+        self.assertEqual(output, "")
+
+    def test_rejected_upload_or_unreadable_catalog_fails_closed(self) -> None:
+        cases = {
+            "upload rejected": ({"post_code": "500"}, 1),
+            "catalog unreadable": ({"get_code": "503"}, 2),
+            "catalog not json": ({"pending": "<html>maintenance</html>"}, 2),
+            "catalog without releases": ({"pending": json.dumps({"success": True, "data": {}})}, 2),
+        }
+        for label, (kwargs, expected_calls) in cases.items():
+            with self.subTest(case=label):
+                result, calls, output, _ = self._run(**kwargs)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(len(calls), expected_calls)
+                self.assertNotIn("candidate_kind=", output)
+
+    def test_bytes_that_differ_from_the_measured_asset_are_never_posted(self) -> None:
+        for label, kwargs in {
+            "checksum": {"checksum": "sha256:" + "1" * 64},
+            "size": {"file_size": 1},
+        }.items():
+            with self.subTest(drift=label):
+                result, calls, output, _ = self._run(**kwargs)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(calls, [])
+                self.assertEqual(output, "")
+
+    def test_readback_is_in_the_upload_step_and_blocking(self) -> None:
+        publish, step = self._step()
+        for policy in ("if", "continue-on-error"):
+            with self.subTest(policy=policy):
+                self.assertNotIn(policy, publish)
+                self.assertNotIn(policy, step)
+        body = step["run"]
+        self.assertIn('"${BEPLY_API_URL}/api/v1/plugins/release"', body)
+        self.assertIn('"${BEPLY_API_URL}/api/v1/plugins/pending-releases"', body)
+        self.assertLess(body.index("/api/v1/plugins/release\""), body.index("/api/v1/plugins/pending-releases"))
 
 
 class ReusableWorkflowToolingTests(unittest.TestCase):

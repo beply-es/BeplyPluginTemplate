@@ -59,7 +59,12 @@ Variables recomendadas:
 - tag/version coherente;
 - SHA exacto del contrato reutilizable;
 - un unico build o reutilizacion del release existente;
-- checksum, bytes, UUID y estado `pending_review` de DEV.
+- checksum, bytes, UUID y estado `pending_review` de DEV;
+- lectura de vuelta, en el mismo paso que la subida, de exactamente una fila
+  `pending-releases` de DEV con el repo, tag, slug, version, SHA-256 y bytes
+  enviados y el `pluginId`/`versionId` devueltos. La respuesta del POST no
+  prueba la fila. Si DEV crea una submission (plugin aun sin fila en el
+  catalogo DEV) no hay fila que leer y el candidato falla cerrado.
 
 `Promote Immutable Plugin To PROD` exige:
 
