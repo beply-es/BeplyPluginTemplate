@@ -45,7 +45,8 @@ Variables recomendadas:
 
 - contrato de plantilla;
 - matriz FacturaScripts;
-- PHP 8.4;
+- PHP 8.2, el runtime de tenant, en lint, unit, runtime y E2E (`min_php` nunca lo supera);
+- compatibilidad PHP 8.4 como aviso que no bloquea;
 - lint;
 - unit;
 - runtime;

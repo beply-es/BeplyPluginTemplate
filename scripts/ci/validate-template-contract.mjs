@@ -86,8 +86,14 @@ if (isTemplate) {
 if (!/^\d+\.\d+$/.test(ini.version || '')) {
   fail('facturascripts.ini version must use X.Y format')
 }
-if (ini.min_php !== '8.4') {
-  fail('facturascripts.ini min_php must be 8.4')
+// The tenant runtime is php:8.2-fpm-alpine; the backend refuses a release
+// whose min_php exceeds it (PLUGIN_MIN_PHP_EXCEEDS_RUNTIME).
+const RUNTIME_PHP = [8, 2]
+const minPhp = /^(\d+)\.(\d+)$/.exec(ini.min_php || '')
+if (!minPhp) {
+  fail('facturascripts.ini min_php must use X.Y format')
+} else if (Number(minPhp[1]) > RUNTIME_PHP[0] || (Number(minPhp[1]) === RUNTIME_PHP[0] && Number(minPhp[2]) > RUNTIME_PHP[1])) {
+  fail(`facturascripts.ini min_php must not exceed the tenant runtime PHP ${RUNTIME_PHP.join('.')}`)
 }
 
 const matrix = readJson('.beply/facturascripts-matrix.json')
@@ -103,8 +109,17 @@ if (templateLock.template !== 'beply-es/BeplyPluginTemplate') {
 if (isTemplate && templateLock.version !== ini.version) {
   fail('template-lock version must match facturascripts.ini')
 }
+if (isTemplate && templateLock.ref !== `v${ini.version}`) {
+  fail('template-lock ref must be the tag of facturascripts.ini version')
+}
 
 const templateSync = readJson('.beply/template-sync.json')
+if (isTemplate && templateSync.defaultRef !== `v${ini.version}`) {
+  fail('template-sync defaultRef must be the tag of facturascripts.ini version')
+}
+if (isTemplate && !new RegExp(`^## v${ini.version.replace('.', '\\.')} - \\d{4}-\\d{2}-\\d{2}$`, 'm').test(readFileSync(resolve(root, 'CHANGELOG.md'), 'utf8'))) {
+  fail('CHANGELOG.md must have a dated section for the template version')
+}
 if (!Array.isArray(templateSync.overwrite) || !Array.isArray(templateSync.createIfMissing) || !Array.isArray(templateSync.neverOverwrite)) {
   fail('template-sync must declare overwrite, createIfMissing and neverOverwrite arrays')
 }

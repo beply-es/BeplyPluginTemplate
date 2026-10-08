@@ -9,10 +9,10 @@ Plantilla base para arrancar un plugin Beply de FacturaScripts con workflow Code
 | Estado | Plantilla base |
 | Tipo | Scaffold reutilizable |
 | Nombre de plugin | `BeplyPluginTemplate` |
-| Version actual | `1.4` |
+| Version actual | `1.5` |
 | Compatibilidad declarada | `FacturaScripts 2026.2+` |
-| PHP minimo declarado | `8.4` |
-| Stack objetivo Beply | `FacturaScripts v2026.3 y v2026.2 / PHP 8.4` |
+| PHP minimo declarado | `8.2` (runtime de tenant `php:8.2-fpm-alpine`; nunca mas) |
+| Stack objetivo Beply | `FacturaScripts v2026.3 y v2026.2 / PHP 8.2`, con escaneo de compatibilidad PHP 8.4 |
 | Estado de manifiesto | `Alineado con stack Beply` |
 | Rama operativa | `main` |
 
@@ -21,7 +21,7 @@ Plantilla base para arrancar un plugin Beply de FacturaScripts con workflow Code
 - Aporta una estructura completa de plugin FacturaScripts lista para renombrar y extender.
 - Incluye contrato de trabajo para Codex en `AGENTS.md` y `docs/CODEX-WORKFLOW.md`.
 - Declara matriz FacturaScripts en `.beply/facturascripts-matrix.json`; la base actual prueba `v2026.3` y `v2026.2`.
-- Incluye gates para unit, runtime, E2E, PHP 8.4, cobertura UI, documentacion y release.
+- Incluye gates para unit, runtime, E2E en PHP 8.2, cobertura UI, documentacion y release, y un escaneo de compatibilidad PHP 8.4 que avisa sin bloquear.
 - Incluye documentacion de usuario local en `docs/user/` y mapa de impacto base/modulo en `docs/docs-sync/`.
 - Incluye `Tools/manifest.json` y provider compatible con `BeplyAgents`.
 - Incluye flujo clean-room para ROM copy visual sin copiar codigo del original.
@@ -35,7 +35,7 @@ Plantilla base para arrancar un plugin Beply de FacturaScripts con workflow Code
 
 | Evento | Flujo | Resultado |
 | --- | --- | --- |
-| `push` a cualquier rama | `Tests` | Valida contrato, docs, PHP 8.4, lint, unit, runtime y E2E contra la matriz FacturaScripts. |
+| `push` a cualquier rama | `Tests` | Valida contrato, docs, lint, unit, runtime y E2E en PHP 8.2 contra la matriz FacturaScripts, y escanea compatibilidad PHP 8.4 sin bloquear. |
 | `pull_request` | `Tests` | Valida el cambio sin publicar artefactos. |
 | `main` | `Tests` | Valida codigo y contratos; no publica candidatos. |
 | `tag vX.Y` | `Tests` + `Release Plugin` | Construye un unico ZIP, crea el GitHub Release y sube exactamente esos bytes a DEV como `pending_review`. |
@@ -58,8 +58,8 @@ La plantilla se usa al crear el plugin. Despues, el producto manda. Si se quiere
 traer mejoras comunes de la plantilla, usar solo el sync controlado:
 
 ```bash
-node scripts/template/sync-template.mjs --ref v1.4
-node scripts/template/sync-template.mjs --ref v1.4 --apply
+node scripts/template/sync-template.mjs --ref v1.5
+node scripts/template/sync-template.mjs --ref v1.5 --apply
 ```
 
 El sync actualiza CI, scripts, docs de proceso y contratos comunes. Los adapters
