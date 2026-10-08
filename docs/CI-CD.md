@@ -87,6 +87,61 @@ para el `pluginName` promovido y rechaza peers invalidos o duplicados del
 objetivo. El opt-in no relaja la identidad inmutable ni permite seleccionar por
 `latest`, version parcial o posicion en el log.
 
+## Procedencia de fuente (`beply-plugin-source-provenance-v1`)
+
+El candidato inmutable se divide en dos jobs:
+
+1. `source_provenance` (`Publish Immutable Release And Source Provenance Carrier`):
+   comprueba que `refs/tags/${GITHUB_REF_NAME}^{commit}` es exactamente
+   `GITHUB_SHA` (anotado o ligero; si no, falla cerrado), construye o reutiliza el
+   asset del GitHub Release, genera el manifiesto con
+   `scripts/ci/build_source_provenance_manifest.mjs` y lo sube como unico fichero
+   `plugin-source-provenance.json` en el artefacto
+   `plugin-source-provenance-${{ github.run_id }}-${{ github.run_attempt }}`
+   con `actions/upload-artifact@<sha40>` (paso `Upload plugin source provenance carrier`).
+2. `publish` (`needs: source_provenance`): descarga los mismos bytes, comprueba
+   SHA-256 y tamano, y hace el POST con
+   `sourceProvenance={"runId","runAttempt","publisherJobId","manifestArtifactId"}`,
+   `sourceProvenanceEnvironment` (`dev` por defecto), `releaseTrack` explicito y
+   `sourceBranch` igual al tag.
+
+El manifiesto es JSON canonico (claves ordenadas, sin espacios ni salto final) y
+replica el esquema estricto del backend. Contiene repositorio e id, commit, tag,
+workflow llamador y su blob en ese commit, run/attempt, `publisherJobKey` (clave
+del job llamador, `caller_job_key`), id del job interno, evento y ref; release id
+y `published_at`; asset id, nombre, `digest` de la API y bytes; y `fsName`/version.
+
+El ZIP se construye siempre una sola vez, de forma determinista, y el asset
+publicado (nuevo o reutilizado) se descarga y se compara byte a byte con esa
+construccion antes de firmar el manifiesto. Un asset subido a mano o
+pre-colocado falla cerrado.
+
+Modo «solo procedencia»: un `workflow_dispatch` sobre el ref del tag ya
+publicado no crea ninguna release y exige que exista; reconstruye, compara byte a
+byte con el asset publicado, genera el portador con `event=workflow_dispatch` y
+hace POST del mismo asset para mejorar el testigo de la version existente. Para
+usarlo, el `release.yml` del plugin **en el commit del tag** tiene que declarar
+`workflow_dispatch` y llamar ya a este reusable, y la raiz tiene que incluir
+`workflow_dispatch` en `events`. Los tags anteriores a este contrato no se
+pueden rellenar asi. Ademas, la plataforma exige hoy que el asset lo haya
+subido `github-actions[bot]` durante el propio run (`created_at >= run.created_at`).
+Por eso, un dispatch sobre una release publicada antes de ese run falla cerrado
+hasta que se decida otra cosa.
+
+Como el POST sale del mismo run, la plataforma registra el testigo como
+`pending` (el job publicador ya esta `completed/success`, el run no). Cuando el
+run termina en `success`, la plataforma lo reverifica y lo pasa a `verified`.
+
+La plataforma lo acepta solo con una raiz `tag-publisher` que permita el SHA
+exacto de este reusable. Ademas, en el `release.yml` del plugin,
+`with.contract_sha` tiene que ser literalmente ese mismo SHA: el tooling (ZIP y
+manifiesto) se descarga de `contract_sha`, y una expresion u otro commit se
+rechazan. Si no la tiene, rechaza la subida: primero se configura
+la raiz y despues se sube el pin del plugin. Un `uses:` local (el propio
+template) nunca cumple esa raiz, asi que `release.yml` del template pasa
+`submit_source_provenance: false`. Si hace falta reintentar, se relanzan todos
+los jobs: relanzar solo el POST cambia el attempt y la plataforma lo rechaza.
+
 ## Plataforma
 
 La API de release es:

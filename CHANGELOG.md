@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- El candidato inmutable sube un portador `beply-plugin-source-provenance-v1`
+  (job interno `source_provenance`) y el POST a DEV, en un job separado con
+  `needs`, envia el localizador `sourceProvenance` y
+  `sourceProvenanceEnvironment`. El tag debe pelar exactamente al commit del run.
 - Anade el contrato reutilizable build-once para publicar un unico asset
   inmutable en DEV y promover exactamente los mismos bytes a PROD tras DEV100.
 - Define evidencia machine-readable fail-closed para UUID/versionId, SHA-256,

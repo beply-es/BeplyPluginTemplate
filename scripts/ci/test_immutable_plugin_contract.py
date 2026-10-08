@@ -416,6 +416,109 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class SourceProvenanceCarrierTests(unittest.TestCase):
+    """Estructura que el verificador del backend exige al publicador por tag.
+
+    El backend (raiz `tag-publisher`) lee este reusable en el SHA permitido y
+    exige: job interno `source_provenance` con nombre exacto, un unico paso de
+    subida `actions/upload-artifact@<sha40>` con el nombre de artefacto literal y
+    sin `continue-on-error`; y el job del POST separado con `needs`, para que el
+    job publicador ya este `completed/success` cuando el backend lo consulta.
+    """
+
+    ROOT = Path(__file__).resolve().parents[2]
+    INNER_JOB_KEY = "source_provenance"
+    INNER_JOB_NAME = "Publish Immutable Release And Source Provenance Carrier"
+    UPLOAD_STEP_NAME = "Upload plugin source provenance carrier"
+    ARTIFACT_NAME = "plugin-source-provenance-${{ github.run_id }}-${{ github.run_attempt }}"
+
+    def _candidate(self):
+        path = self.ROOT / ".github/workflows/reusable-immutable-plugin-candidate.yml"
+        return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    def test_inner_publisher_job_uploads_exactly_one_pinned_carrier(self) -> None:
+        jobs = self._candidate()["jobs"]
+        inner = jobs[self.INNER_JOB_KEY]
+        self.assertEqual(inner["name"], self.INNER_JOB_NAME)
+        self.assertNotIn("strategy", inner)
+        self.assertNotIn("continue-on-error", inner)
+        self.assertEqual(inner["permissions"].get("actions"), "read")
+        uploads = [step for step in inner["steps"] if step.get("name") == self.UPLOAD_STEP_NAME]
+        self.assertEqual(len(uploads), 1)
+        upload = uploads[0]
+        self.assertRegex(upload["uses"], r"^actions/upload-artifact@[0-9a-f]{40}$")
+        self.assertEqual(upload["with"]["name"], self.ARTIFACT_NAME)
+        self.assertEqual(upload["with"].get("if-no-files-found"), "error")
+        self.assertNotIn("continue-on-error", upload)
+        self.assertNotIn("if", upload)
+        self.assertEqual(inner["outputs"]["artifact_id"], "${{ steps.provenance_carrier.outputs.artifact-id }}")
+        self.assertEqual(upload.get("id"), "provenance_carrier")
+
+    def test_manifest_builder_knows_its_own_inner_job_and_tag_peel_is_enforced(self) -> None:
+        inner = self._candidate()["jobs"][self.INNER_JOB_KEY]
+        steps = inner["steps"]
+        names = [step.get("name") for step in steps]
+        builder = next(step for step in steps if "build_source_provenance_manifest.mjs" in (step.get("run") or ""))
+        self.assertEqual(builder["env"]["PUBLISHER_JOB_NAME"], self.INNER_JOB_NAME)
+        self.assertEqual(builder["env"]["CALLER_JOB_KEY"], "${{ inputs.caller_job_key }}")
+        self.assertLess(names.index(builder["name"]), names.index(self.UPLOAD_STEP_NAME))
+        peel = next(step for step in steps if "^{commit}" in (step.get("run") or ""))
+        self.assertIn('refs/tags/${GITHUB_REF_NAME}^{commit}', peel["run"])
+        self.assertIn('"${GITHUB_SHA}"', peel["run"])
+        self.assertLess(names.index(peel["name"]), names.index("Create immutable GitHub Release asset"))
+        self.assertEqual(
+            sum("build_plugin_zip.py" in (step.get("run") or "") for job in self._candidate()["jobs"].values() for step in job["steps"]),
+            1,
+        )
+
+    def test_post_job_needs_the_carrier_job_and_sends_the_locator(self) -> None:
+        doc = self._candidate()
+        publish = doc["jobs"]["publish"]
+        self.assertEqual(publish["needs"], self.INNER_JOB_KEY)
+        upload_dev = next(step for step in publish["steps"] if step.get("id") == "upload_dev")
+        body = upload_dev["run"]
+        self.assertIn('--form-string "sourceProvenance=${SOURCE_PROVENANCE_LOCATOR}"', body)
+        self.assertIn('-F "sourceProvenanceEnvironment=${SOURCE_PROVENANCE_ENVIRONMENT}"', body)
+        self.assertIn('-F "sourceBranch=${GITHUB_REF_NAME}"', body)
+        self.assertIn('-F "releaseTrack=${RELEASE_TRACK}"', body)
+        self.assertIn("manifestArtifactId:$manifestArtifactId", body)
+        env = upload_dev["env"]
+        self.assertEqual(env["MANIFEST_ARTIFACT_ID"], "${{ needs.source_provenance.outputs.artifact_id }}")
+        self.assertEqual(env["PUBLISHER_JOB_ID"], "${{ needs.source_provenance.outputs.publisher_job_id }}")
+        inputs = doc[True]["workflow_call"]["inputs"] if True in doc else doc["on"]["workflow_call"]["inputs"]
+        self.assertEqual(inputs["source_provenance_environment"]["default"], "dev")
+        self.assertIs(inputs["submit_source_provenance"]["default"], True)
+        self.assertEqual(inputs["caller_job_key"]["default"], "publish_immutable_candidate")
+        self.assertNotIn("BEPLY_DEV_CI_TOKEN", str(doc["jobs"][self.INNER_JOB_KEY]))
+
+    def test_every_published_asset_is_byte_compared_with_one_deterministic_build(self) -> None:
+        steps = self._candidate()["jobs"][self.INNER_JOB_KEY]["steps"]
+        build = next(step for step in steps if "build_plugin_zip.py" in (step.get("run") or ""))
+        self.assertNotIn("if", build, "the deterministic build must always run")
+        self.assertIn("/tmp/build/", build["run"])
+        compare = next(step for step in steps if "cmp " in (step.get("run") or ""))
+        self.assertNotIn("if", compare, "every asset, new or reused, is byte-compared")
+        self.assertIn("gh release download", compare["run"])
+        names = [step.get("name") for step in steps]
+        self.assertLess(names.index(compare["name"]), names.index("Build source provenance manifest"))
+
+    def test_provenance_only_dispatch_never_creates_a_release_and_requires_one(self) -> None:
+        steps = self._candidate()["jobs"][self.INNER_JOB_KEY]["steps"]
+        create = next(step for step in steps if step.get("name") == "Create immutable GitHub Release asset")
+        self.assertIn("github.event_name == 'push'", create["if"])
+        guard = next(step for step in steps if step.get("name") == "Require a published release for provenance-only dispatch")
+        self.assertIn("workflow_dispatch", guard["if"])
+        validate = next(step for step in steps if step.get("name") == "Validate immutable caller and contract identities")
+        self.assertIn("workflow_dispatch", validate["run"])
+        self.assertIn('test "${GITHUB_REF_TYPE}" = "tag"', validate["run"])
+
+    def test_template_release_never_claims_tag_publisher_provenance_for_a_local_call(self) -> None:
+        release = yaml.safe_load((self.ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+        job = release["jobs"]["publish_immutable_candidate"]
+        self.assertTrue(job["uses"].startswith("./"))
+        self.assertIs(job["with"]["submit_source_provenance"], False)
+
+
 class ReusableWorkflowToolingTests(unittest.TestCase):
     """El runner `arc-runner-set` NO trae `gh` preinstalado.
 

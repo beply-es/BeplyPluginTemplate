@@ -54,6 +54,14 @@ if (isTemplate) {
   check(candidate.includes('gh release download'), 'Candidate contract must reuse an existing immutable release asset on retry')
   check(candidate.includes('--repo "${GITHUB_REPOSITORY}"'), 'Candidate contract must resolve the caller repository explicitly')
   check(candidate.includes('pending_review'), 'Candidate contract must leave the DEV candidate pending review')
+  check(candidate.includes('build_source_provenance_manifest.mjs'), 'Candidate contract must build the source provenance manifest')
+  check(
+    /uses:\s*actions\/upload-artifact@[0-9a-f]{40}/.test(candidate)
+      && candidate.includes('name: plugin-source-provenance-${{ github.run_id }}-${{ github.run_attempt }}'),
+    'Candidate contract must upload the source provenance carrier with a pinned action and the exact artifact name',
+  )
+  check(candidate.includes('needs: source_provenance'), 'Candidate POST must run after the source provenance carrier job')
+  check(candidate.includes('sourceProvenance=${SOURCE_PROVENANCE_LOCATOR}'), 'Candidate contract must send the source provenance locator')
   check(!candidate.includes('BEPLY_PROD_CI_TOKEN'), 'Candidate contract must not contain PROD credentials')
   check(promotion.includes('gh release download'), 'Promotion contract must download the immutable release asset')
   check(
