@@ -63,8 +63,12 @@ Variables recomendadas:
 - lectura de vuelta, en el mismo paso que la subida, de exactamente una fila
   `pending-releases` de DEV con el repo, tag, slug, version, SHA-256 y bytes
   enviados y el `pluginId`/`versionId` devueltos. La respuesta del POST no
-  prueba la fila. Si DEV crea una submission (plugin aun sin fila en el
-  catalogo DEV) no hay fila que leer y el candidato falla cerrado.
+  prueba la fila;
+- antes de subir nada, que el plugin ya exista en el catalogo DEV: su release
+  anterior `vX.Y` tiene que responder en `release-witness`. Un plugin nuevo
+  (sin release anterior o sin esa version en DEV) falla cerrado sin POST: su
+  alta va por la ingesta canonica de k3s (`dev/prod-plugin-artifact-ingest.yml`).
+  Cualquier otra respuesta del catalogo es un error de lectura, nunca "nuevo".
 
 `Promote Immutable Plugin To PROD` exige:
 

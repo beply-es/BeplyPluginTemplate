@@ -528,8 +528,12 @@ class DevCandidateCatalogReadbackTests(unittest.TestCase):
 
     `upload_dev` solo puede salir en verde si, en el mismo paso, lee de vuelta
     del catalogo DEV exactamente una fila `pending_review` para los bytes
-    enviados y la identidad que devolvio la subida. Se ejecuta el cuerpo real
-    del paso con `curl` sustituido por fixtures; jq, sha256sum y stat son reales.
+    enviados y la identidad que devolvio la subida. Antes, `catalog_identity`
+    rechaza sin subir nada un plugin que el catalogo DEV no conoce: su primera
+    subida crearia una submission y fallaria despues, un efecto parcial que un
+    reintento no arregla (la version es inmutable). Se ejecutan los cuerpos
+    reales de los dos pasos, en el orden del job, con `curl` y `gh` sustituidos
+    por fixtures; jq, sha256sum y stat son reales.
     """
 
     ROOT = Path(__file__).resolve().parents[2]
@@ -539,7 +543,30 @@ class DevCandidateCatalogReadbackTests(unittest.TestCase):
     PLUGIN_ID = "33333333-3333-4333-8333-333333333333"
     VERSION_ID = "44444444-4444-4444-8444-444444444444"
     SUBMISSION_ID = "55555555-5555-4555-8555-555555555555"
+    NEW_PLUGIN = "plugin nuevo: el alta va por la ingesta canónica de k3s, dev/prod-plugin-artifact-ingest.yml"
+    FAKE_GH = """#!/bin/sh
+printf '%s\\n' "$*" >> "$GH_CALLS"
+if [ "$GH_EXIT" != "0" ]; then
+  echo "gh: HTTP 502" >&2
+  exit 1
+fi
+cat "$RELEASES_FILE"
+"""
     FAKE_CURL = """#!/bin/sh
+case "$*" in
+  *release-witness*)
+    printf '%s\\n' "$*" >> "$WITNESS_CALLS"
+    out=""
+    previous=""
+    for arg in "$@"; do
+      if [ "$previous" = "-o" ]; then out="$arg"; fi
+      previous="$arg"
+    done
+    cat "$WITNESS_FILE" > "$out"
+    printf '%s' "$WITNESS_CODE"
+    exit 0
+    ;;
+esac
 printf '%s\\n' "$*" >> "$CALLS"
 case "$*" in
   *"-X POST"*)
@@ -556,10 +583,10 @@ case "$*" in
 esac
 """
 
-    def _step(self):
+    def _step(self, step_id: str = "upload_dev"):
         path = self.ROOT / ".github/workflows/reusable-immutable-plugin-candidate.yml"
         publish = yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"]["publish"]
-        return publish, next(step for step in publish["steps"] if step.get("id") == "upload_dev")
+        return publish, next(step for step in publish["steps"] if step.get("id") == step_id)
 
     def _script(self, attested_checksum: str) -> str:
         values = {
@@ -578,7 +605,9 @@ esac
         return re.sub(r"\$\{\{\s*([^}]+?)\s*\}\}", render, self._step()[1]["run"])
 
     def _run(self, rows=None, *, kind="plugin_version", post_code="201", get_code="200",
-             pending=None, checksum=None, file_size=None, attestation="false", provenance="false"):
+             pending=None, checksum=None, file_size=None, attestation="false", provenance="false",
+             releases=None, witness_code="200", witness=None, witness_changes=None, gh_exit="0",
+             token="fixture-token"):
         name = "ReadbackFixture" + uuid.uuid4().hex[:12]
         payload = b"PK\x03\x04 immutable fixture bytes"
         asset = Path("/tmp") / f"{name}-v{self.VERSION}.zip"
@@ -588,9 +617,18 @@ esac
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
         directory = Path(scratch.name)
-        curl = directory / "curl"
-        curl.write_text(self.FAKE_CURL)
-        curl.chmod(0o700)
+        for tool, body in (("curl", self.FAKE_CURL), ("gh", self.FAKE_GH)):
+            (directory / tool).write_text(body)
+            (directory / tool).chmod(0o700)
+        if releases is None:
+            releases = [{"tag_name": self.TAG, "draft": False}, {"tag_name": "v0.9", "draft": False}]
+        (directory / "releases.json").write_text(json.dumps(releases))
+        if witness is None:
+            witness = {"success": True, "data": {"witness": {
+                "claimed": True, "pluginId": self.PLUGIN_ID, "versionId": "66666666-6666-4666-8666-666666666666",
+                "pluginSlug": name.lower(), "pluginFsName": name, "version": "0.9", "releaseStatus": "approved",
+                **(witness_changes or {})}}}
+        (directory / "witness.json").write_text(witness if isinstance(witness, str) else json.dumps(witness))
         exact = {
             "versionId": self.VERSION_ID,
             "pluginId": self.PLUGIN_ID,
@@ -610,7 +648,7 @@ esac
         data.update({"pluginId": self.PLUGIN_ID, "versionId": self.VERSION_ID} if kind == "plugin_version"
                     else {"submissionId": self.SUBMISSION_ID})
         (directory / "post.json").write_text(json.dumps({"success": True, "data": data}))
-        for name_ in ("calls", "output", "summary"):
+        for name_ in ("calls", "witness_calls", "gh_calls", "output", "summary"):
             (directory / name_).write_text("")
         declared = checksum or actual
         env = {
@@ -620,8 +658,15 @@ esac
             "POST_CODE": post_code,
             "GET_CODE": get_code,
             "PENDING_FILE": str(directory / "pending.json"),
+            "WITNESS_CALLS": str(directory / "witness_calls"),
+            "WITNESS_FILE": str(directory / "witness.json"),
+            "WITNESS_CODE": witness_code,
+            "GH_CALLS": str(directory / "gh_calls"),
+            "GH_EXIT": gh_exit,
+            "RELEASES_FILE": str(directory / "releases.json"),
+            "GH_TOKEN": "fixture-github-token",
             "BEPLY_API_URL": "https://dev.fixture.invalid",
-            "BEPLY_CI_TOKEN": "fixture-token",
+            "BEPLY_CI_TOKEN": token,
             "PLUGIN_NAME": name,
             "PLUGIN_VERSION": self.VERSION,
             "CHECKSUM": declared,
@@ -641,11 +686,20 @@ esac
             "GITHUB_OUTPUT": str(directory / "output"),
             "GITHUB_STEP_SUMMARY": str(directory / "summary"),
         }
+        identity = self._step("catalog_identity")[1]["run"]
+        self.assertNotIn("${{", identity, "catalog_identity must read its inputs from env")
         result = subprocess.run(
-            ["bash", "--noprofile", "--norc", "-e", "-c", self._script(declared)],
+            ["bash", "--noprofile", "--norc", "-e", "-c", identity],
             env=env, capture_output=True, text=True, check=False, timeout=60,
         )
+        if result.returncode == 0:
+            result = subprocess.run(
+                ["bash", "--noprofile", "--norc", "-e", "-c", self._script(declared)],
+                env=env, capture_output=True, text=True, check=False, timeout=60,
+            )
         calls = (directory / "calls").read_text().splitlines()
+        self.witness_calls = (directory / "witness_calls").read_text().splitlines()
+        self.gh_calls = (directory / "gh_calls").read_text().splitlines()
         return result, calls, (directory / "output").read_text(), exact
 
     def test_exactly_one_matching_pending_row_is_the_only_green(self) -> None:
@@ -734,6 +788,91 @@ esac
         self.assertIn('"${BEPLY_API_URL}/api/v1/plugins/release"', body)
         self.assertIn('"${BEPLY_API_URL}/api/v1/plugins/pending-releases"', body)
         self.assertLess(body.index("/api/v1/plugins/release\""), body.index("/api/v1/plugins/pending-releases"))
+
+    def test_new_plugin_is_refused_before_any_upload(self) -> None:
+        current = {"tag_name": self.TAG, "draft": False}
+        not_found = {"success": False, "error": "Exact persisted release witness not found", "code": "RELEASE_WITNESS_NOT_FOUND"}
+        cases = {
+            "first release": {"releases": [current]},
+            "only non-version releases": {"releases": [current, {"tag_name": "main-" + "a" * 40, "draft": False},
+                                                       {"tag_name": "docs-dev-20260916", "draft": False}]},
+            "only a draft before": {"releases": [current, {"tag_name": "v0.9", "draft": True}]},
+            "previous version unknown to DEV": {"witness_code": "404", "witness": not_found},
+        }
+        for label, kwargs in cases.items():
+            with self.subTest(case=label):
+                result, calls, output, _ = self._run(**kwargs)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(self.NEW_PLUGIN, result.stdout)
+                self.assertEqual(result.stdout.count("::error::"), 1, result.stdout)
+                self.assertEqual(calls, [], "a new plugin must not reach any upload")
+                self.assertEqual(output, "")
+                if "witness_code" not in kwargs:
+                    self.assertEqual(self.witness_calls, [], "without a previous release there is nothing to read")
+
+    def test_an_unreadable_catalog_is_red_and_never_read_as_a_new_plugin(self) -> None:
+        cases = {
+            "server error": {"witness_code": "500", "witness": {"success": False, "code": "INTERNAL_ERROR"}},
+            "unavailable": {"witness_code": "503", "witness": "<html>maintenance</html>"},
+            "unknown route": {"witness_code": "404", "witness": {"success": False, "code": "NOT_FOUND"}},
+            "html 404": {"witness_code": "404", "witness": "<html>not found</html>"},
+            "ambiguous owner": {"witness_code": "409", "witness": {"success": False, "code": "RELEASE_WITNESS_AMBIGUOUS"}},
+            "unauthorized": {"witness_code": "401", "witness": {"success": False, "code": "UNAUTHORIZED"}},
+            "foreign slug": {"witness_changes": {"pluginSlug": "otherplugin"}},
+            "foreign version": {"witness_changes": {"version": "0.8"}},
+            "no plugin id": {"witness_changes": {"pluginId": ""}},
+            "unclaimed": {"witness_changes": {"claimed": False}},
+            "not success": {"witness": {"success": False, "data": {}}},
+            "github unreadable": {"gh_exit": "1"},
+            "no catalog token": {"token": ""},
+        }
+        for label, kwargs in cases.items():
+            with self.subTest(case=label):
+                result, calls, output, _ = self._run(**kwargs)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("plugin nuevo", result.stdout)
+                self.assertEqual(calls, [])
+                self.assertEqual(output, "")
+                if label == "no catalog token":
+                    self.assertEqual((self.gh_calls, self.witness_calls), ([], []))
+
+    def test_existing_plugin_is_proven_by_its_previous_release_in_dev(self) -> None:
+        releases = [
+            {"tag_name": self.TAG, "draft": False},
+            {"tag_name": "main-" + "b" * 40, "draft": False},
+            {"tag_name": "v0.95", "draft": True},
+            {"tag_name": "v0.9", "draft": False},
+            {"tag_name": "v0.8", "draft": False},
+        ]
+        result, calls, output, exact = self._run(releases=releases)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(len(self.gh_calls), 1)
+        self.assertIn(f"repos/{self.REPOSITORY}/releases", self.gh_calls[0])
+        self.assertEqual(len(self.witness_calls), 1)
+        query = self.witness_calls[0]
+        for fragment in ("Authorization: Bearer fixture-token", f"sourceRepoFullName={self.REPOSITORY}",
+                         f"pluginSlug={exact['pluginSlug']}", "version=0.9",
+                         "https://dev.fixture.invalid/api/v1/plugins/release-witness"):
+            self.assertIn(fragment, query)
+        self.assertNotIn("-X POST", query)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("candidate_kind=plugin_version\n", output)
+
+    def test_catalog_identity_runs_unconditionally_before_any_effect(self) -> None:
+        publish, step = self._step("catalog_identity")
+        names = [item.get("name") for item in publish["steps"]]
+        for later in ("attestation", "upload_dev"):
+            with self.subTest(before=later):
+                after = next(item for item in publish["steps"] if item.get("id") == later)
+                self.assertLess(names.index(step["name"]), names.index(after["name"]))
+        for policy in ("if", "continue-on-error"):
+            self.assertNotIn(policy, step)
+        env = step["env"]
+        self.assertEqual(env["BEPLY_API_URL"], "${{ inputs.dev_api_url }}")
+        self.assertEqual(env["BEPLY_CI_TOKEN"], "${{ secrets.BEPLY_DEV_CI_TOKEN }}")
+        self.assertEqual(env["PLUGIN_NAME"], "${{ needs.source_provenance.outputs.plugin_name }}")
+        self.assertEqual(env["GH_TOKEN"], "${{ github.token }}")
+        self.assertIn(self.NEW_PLUGIN, step["run"])
 
 
 class ReusableWorkflowToolingTests(unittest.TestCase):

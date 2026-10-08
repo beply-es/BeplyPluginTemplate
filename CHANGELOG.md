@@ -4,8 +4,9 @@
 
 - El candidato DEV solo sale en verde si lee de vuelta del catalogo DEV
   exactamente una fila `pending_review` para los bytes subidos y el
-  `pluginId`/`versionId` devueltos. Una submission DEV (plugin sin fila en el
-  catalogo) ya no sale en verde: falla cerrada.
+  `pluginId`/`versionId` devueltos. Un plugin que el catalogo DEV no conoce se
+  rechaza antes de subir nada (su alta va por la ingesta canonica de k3s): su
+  primera subida crearia una submission y fallaria despues, sin reintento posible.
 - El candidato inmutable sube un portador `beply-plugin-source-provenance-v1`
   (job interno `source_provenance`) y el POST a DEV, en un job separado con
   `needs`, envia el localizador `sourceProvenance` y

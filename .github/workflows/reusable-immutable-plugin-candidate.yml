@@ -407,6 +407,59 @@ jobs:
           test "sha256:$(sha256sum "/tmp/${ASSET_NAME}" | awk '{print $1}')" = "${EXPECTED_CHECKSUM}" || { echo "::error::release asset checksum drift"; exit 1; }
           test "$(stat -c %s "/tmp/${ASSET_NAME}")" = "${EXPECTED_FILE_SIZE}" || { echo "::error::release asset size drift"; exit 1; }
 
+      - name: Refuse a plugin the DEV catalog does not know before any upload
+        id: catalog_identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEPLY_API_URL: ${{ inputs.dev_api_url }}
+          BEPLY_CI_TOKEN: ${{ secrets.BEPLY_DEV_CI_TOKEN }}
+          PLUGIN_NAME: ${{ needs.source_provenance.outputs.plugin_name }}
+        run: |
+          set -euo pipefail
+          test -n "${BEPLY_CI_TOKEN}" || { echo "::error::BEPLY_DEV_CI_TOKEN is required"; exit 1; }
+          # A new plugin's first upload would create a DEV submission and then
+          # fail the row readback: a partial effect that a rerun cannot repair,
+          # because the version is immutable. The plugin is known only when the
+          # DEV catalog holds its previous released version; anything else that
+          # is not an exact "not found" is an unreadable catalog, never "new".
+          NEW_PLUGIN="::error::plugin nuevo: el alta va por la ingesta canónica de k3s, dev/prod-plugin-artifact-ingest.yml"
+          RELEASES_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
+          PREVIOUS_TAG="$(jq -r --arg current "${GITHUB_REF_NAME}" \
+            '[.[] | select(.draft == false and .tag_name != $current and (.tag_name | test("^v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$")))][0].tag_name // empty' \
+            <<<"${RELEASES_JSON}")"
+          if [ -z "${PREVIOUS_TAG}" ]; then
+            echo "${NEW_PLUGIN} (${GITHUB_REPOSITORY} has no previous release)"
+            exit 1
+          fi
+          PREVIOUS_VERSION="${PREVIOUS_TAG#v}"
+          PLUGIN_SLUG="$(printf '%s' "${PLUGIN_NAME}" | jq -Rr ascii_downcase)"
+          IDENTITY_JSON="$(mktemp)"
+          HTTP_CODE="$(curl -sS -G -o "${IDENTITY_JSON}" -w '%{http_code}' \
+            -H "Authorization: Bearer ${BEPLY_CI_TOKEN}" \
+            --data-urlencode "sourceRepoFullName=${GITHUB_REPOSITORY}" \
+            --data-urlencode "pluginSlug=${PLUGIN_SLUG}" \
+            --data-urlencode "version=${PREVIOUS_VERSION}" \
+            "${BEPLY_API_URL}/api/v1/plugins/release-witness")"
+          case "${HTTP_CODE}" in
+            200)
+              jq -e --arg slug "${PLUGIN_SLUG}" --arg version "${PREVIOUS_VERSION}" \
+                '.success == true and (.data.witness | (.claimed == true) and ((.pluginSlug // "") == $slug) and ((.version // "") == $version) and (.pluginId | type == "string" and length > 0))' \
+                "${IDENTITY_JSON}" >/dev/null || { echo "::error::DEV catalog identity read returned an unexpected witness"; exit 1; }
+              ;;
+            404)
+              if jq -e '.code == "RELEASE_WITNESS_NOT_FOUND"' "${IDENTITY_JSON}" >/dev/null 2>&1; then
+                echo "${NEW_PLUGIN} (the DEV catalog has no ${PLUGIN_SLUG} ${PREVIOUS_VERSION})"
+                exit 1
+              fi
+              echo "::error::DEV catalog identity read failed with HTTP 404"
+              exit 1
+              ;;
+            *)
+              echo "::error::DEV catalog identity read failed with HTTP ${HTTP_CODE}"
+              exit 1
+              ;;
+          esac
+
       - name: Generate DEV artifact attestation from immutable bytes
         id: attestation
         env:
