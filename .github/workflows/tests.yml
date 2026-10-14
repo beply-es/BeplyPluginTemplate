@@ -498,6 +498,7 @@ jobs:
             facturascripts/${{ steps.e2e-targets.outputs.tests_dir }}/playwright-report
             facturascripts/${{ steps.e2e-targets.outputs.tests_dir }}/test-results
             ${{ runner.temp }}/${{ env.PLUGIN_FOLDER }}-php-server.log
+          retention-days: 1
 
       - name: Stop PHP server
         if: always()
