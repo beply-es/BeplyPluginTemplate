@@ -312,8 +312,12 @@ jobs:
           PUBLISHER_JOB_NAME: Publish Immutable Release And Source Provenance Carrier
         run: node contract/scripts/ci/build_source_provenance_manifest.mjs
 
+      # Only a caller that claims provenance has a consumer for the carrier; a
+      # caller with submit_source_provenance=false (BeplyCRM, Calendar, ...)
+      # must not fail its release on an artifact upload nobody reads.
       - name: Upload plugin source provenance carrier
         id: provenance_carrier
+        if: inputs.submit_source_provenance
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: plugin-source-provenance-${{ github.run_id }}-${{ github.run_attempt }}
@@ -321,6 +325,7 @@ jobs:
           if-no-files-found: error
 
       - name: Validate source provenance carrier identity
+        if: inputs.submit_source_provenance
         env:
           ARTIFACT_ID: ${{ steps.provenance_carrier.outputs.artifact-id }}
           ARTIFACT_DIGEST: ${{ steps.provenance_carrier.outputs.artifact-digest }}

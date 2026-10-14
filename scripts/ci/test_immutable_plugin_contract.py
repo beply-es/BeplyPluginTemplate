@@ -454,9 +454,31 @@ class SourceProvenanceCarrierTests(unittest.TestCase):
         self.assertEqual(upload["with"]["name"], self.ARTIFACT_NAME)
         self.assertEqual(upload["with"].get("if-no-files-found"), "error")
         self.assertNotIn("continue-on-error", upload)
-        self.assertNotIn("if", upload)
+        # Solo condicionado a que el llamador reclame la procedencia; con la
+        # reclamacion activa corre siempre y el backend exige su success.
+        self.assertEqual(upload.get("if"), "inputs.submit_source_provenance")
         self.assertEqual(inner["outputs"]["artifact_id"], "${{ steps.provenance_carrier.outputs.artifact-id }}")
         self.assertEqual(upload.get("id"), "provenance_carrier")
+
+    def test_carrier_upload_and_its_validation_run_only_when_provenance_is_submitted(self) -> None:
+        # Un llamador que no reclama procedencia (`submit_source_provenance:
+        # false`, p. ej. BeplyCRM) no tiene consumidor del carrier: subirlo
+        # igualmente hace caer su release cuando GitHub no admite artifacts
+        # (cuota de la org agotada hasta el 1-11, TAREA-117.1).
+        steps = self._candidate()["jobs"][self.INNER_JOB_KEY]["steps"]
+        gate = "inputs.submit_source_provenance"
+        upload = next(step for step in steps if step.get("name") == self.UPLOAD_STEP_NAME)
+        self.assertEqual(upload.get("if"), gate)
+        check = next(step for step in steps if step.get("name") == "Validate source provenance carrier identity")
+        self.assertEqual(check.get("if"), gate)
+        guarded = [step.get("name") for step in steps if "if" in step and gate in str(step["if"])]
+        self.assertEqual(guarded, [self.UPLOAD_STEP_NAME, "Validate source provenance carrier identity"])
+        builder = next(step for step in steps if step.get("name") == "Build source provenance manifest")
+        self.assertNotIn("if", builder)
+        publish = self._candidate()["jobs"]["publish"]
+        upload_dev = next(step for step in publish["steps"] if step.get("id") == "upload_dev")
+        self.assertIn('if [ "${SUBMIT_SOURCE_PROVENANCE}" = "true" ]; then', upload_dev["run"])
+        self.assertEqual(upload_dev["env"]["SUBMIT_SOURCE_PROVENANCE"], "${{ inputs.submit_source_provenance }}")
 
     def test_manifest_builder_knows_its_own_inner_job_and_tag_peel_is_enforced(self) -> None:
         inner = self._candidate()["jobs"][self.INNER_JOB_KEY]
