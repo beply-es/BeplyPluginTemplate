@@ -446,6 +446,8 @@ class SourceProvenanceCarrierTests(unittest.TestCase):
         self.assertEqual(inner["name"], self.INNER_JOB_NAME)
         self.assertNotIn("strategy", inner)
         self.assertNotIn("continue-on-error", inner)
+        # Gating the whole job would skip `publish` (needs) and never upload the release.
+        self.assertNotIn("if", inner)
         self.assertEqual(inner["permissions"].get("actions"), "read")
         uploads = [step for step in inner["steps"] if step.get("name") == self.UPLOAD_STEP_NAME]
         self.assertEqual(len(uploads), 1)
