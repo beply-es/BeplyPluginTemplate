@@ -494,10 +494,59 @@ class SourceProvenanceCarrierTests(unittest.TestCase):
         self.assertIn('refs/tags/${GITHUB_REF_NAME}^{commit}', peel["run"])
         self.assertIn('"${GITHUB_SHA}"', peel["run"])
         self.assertLess(names.index(peel["name"]), names.index("Create immutable GitHub Release asset"))
+
         self.assertEqual(
             sum("build_plugin_zip.py" in (step.get("run") or "") for job in self._candidate()["jobs"].values() for step in job["steps"]),
             1,
         )
+
+    def test_new_publications_require_lightweight_tags_but_historical_dispatch_still_peels(self) -> None:
+        steps = self._candidate()["jobs"][self.INNER_JOB_KEY]["steps"]
+        guard = next(step["run"] for step in steps if "^{commit}" in (step.get("run") or ""))
+        for annotated, event, drift, allowed in (
+            (False, "push", False, True),
+            (True, "push", False, False),
+            (True, "workflow_dispatch", False, True),
+            (False, "push", True, False),
+        ):
+            with self.subTest(annotated=annotated, event=event, drift=drift):
+                with tempfile.TemporaryDirectory(prefix="beply-tag-guard-") as tmp:
+                    root = Path(tmp)
+                    plugin = root / "plugin"
+                    plugin.mkdir()
+                    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull,
+                           "GIT_CONFIG_NOSYSTEM": "1", "TZ": "UTC",
+                           "GIT_AUTHOR_NAME": "Synthetic tag fixture",
+                           "GIT_COMMITTER_NAME": "Synthetic tag fixture",
+                           "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+                           "GIT_COMMITTER_EMAIL": "fixture@example.invalid"}
+
+                    def git(*args, cwd=plugin):
+                        return subprocess.run(["git", *args], cwd=cwd, env=env,
+                                              capture_output=True, text=True, check=True)
+
+                    git("init", "--bare", str(root / "origin.git"), cwd=root)
+                    git("init")
+                    (plugin / "source.txt").write_text("first\n")
+                    git("add", "source.txt")
+                    git("commit", "-m", "synthetic source")
+                    if annotated:
+                        git("tag", "-a", "v1.2", "-m", "synthetic annotation")
+                    else:
+                        git("tag", "v1.2")
+                    if drift:
+                        (plugin / "source.txt").write_text("second\n")
+                        git("commit", "-am", "different run source")
+                    sha = git("rev-parse", "HEAD").stdout.strip()
+                    git("remote", "add", "origin", str(root / "origin.git"))
+                    git("push", "origin", "HEAD:refs/heads/main", "refs/tags/v1.2")
+                    result = subprocess.run(["bash", "-c", guard], cwd=root,
+                                            env={**env, "GITHUB_EVENT_NAME": event,
+                                                 "GITHUB_REF_NAME": "v1.2", "GITHUB_SHA": sha},
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode == 0, allowed, result.stdout + result.stderr)
+                    if annotated and event == "push":
+                        self.assertIn("lightweight tag", result.stdout + result.stderr)
 
     def test_post_job_needs_the_carrier_job_and_sends_the_locator(self) -> None:
         doc = self._candidate()
