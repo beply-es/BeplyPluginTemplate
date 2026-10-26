@@ -495,6 +495,11 @@ class SourceProvenanceCarrierTests(unittest.TestCase):
         self.assertIn('"${GITHUB_SHA}"', peel["run"])
         self.assertLess(names.index(peel["name"]), names.index("Create immutable GitHub Release asset"))
 
+        self.assertEqual(
+            sum("build_plugin_zip.py" in (step.get("run") or "") for job in self._candidate()["jobs"].values() for step in job["steps"]),
+            1,
+        )
+
     def test_new_publications_require_lightweight_tags_but_historical_dispatch_still_peels(self) -> None:
         steps = self._candidate()["jobs"][self.INNER_JOB_KEY]["steps"]
         guard = next(step["run"] for step in steps if "^{commit}" in (step.get("run") or ""))
@@ -542,10 +547,6 @@ class SourceProvenanceCarrierTests(unittest.TestCase):
                     self.assertEqual(result.returncode == 0, allowed, result.stdout + result.stderr)
                     if annotated and event == "push":
                         self.assertIn("lightweight tag", result.stdout + result.stderr)
-        self.assertEqual(
-            sum("build_plugin_zip.py" in (step.get("run") or "") for job in self._candidate()["jobs"].values() for step in job["steps"]),
-            1,
-        )
 
     def test_post_job_needs_the_carrier_job_and_sends_the_locator(self) -> None:
         doc = self._candidate()
