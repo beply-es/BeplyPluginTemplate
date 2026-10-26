@@ -103,7 +103,9 @@ El candidato inmutable se divide en dos jobs:
 
 1. `source_provenance` (`Publish Immutable Release And Source Provenance Carrier`):
    comprueba que `refs/tags/${GITHUB_REF_NAME}^{commit}` es exactamente
-   `GITHUB_SHA` (anotado o ligero; si no, falla cerrado), construye o reutiliza el
+   `GITHUB_SHA`; las publicaciones nuevas requieren un tag ligero y rechazan
+   tags anotados antes de publicar. Un dispatch de procedencia sobre una release
+   historica conserva el pelado del tag anotado, sin reetiquetarlo. Construye o reutiliza el
    asset del GitHub Release, genera el manifiesto con
    `scripts/ci/build_source_provenance_manifest.mjs` y lo sube como unico fichero
    `plugin-source-provenance.json` en el artefacto

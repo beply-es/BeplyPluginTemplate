@@ -160,9 +160,15 @@ jobs:
       - name: Verify release tag peels to the run commit
         run: |
           set -euo pipefail
-          # Re-read the tag from origin: an annotated or lightweight tag must
-          # peel to exactly the commit this run builds, or nothing is published.
+          # New publications require lightweight tags. Historical annotated
+          # releases may still be verified by a provenance-only dispatch.
           git -C plugin fetch --force --no-tags origin "+refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            test "$(git -C plugin cat-file -t "refs/tags/${GITHUB_REF_NAME}")" = "commit" || {
+              echo "::error::new releases require a lightweight tag (git tag vX.Y COMMIT, without -a or -s); do not retag an existing release"
+              exit 1
+            }
+          fi
           PEELED="$(git -C plugin rev-parse --verify "refs/tags/${GITHUB_REF_NAME}^{commit}")"
           test "${PEELED}" = "${GITHUB_SHA}" || { echo "::error::release tag does not peel to the run commit"; exit 1; }
 
