@@ -86,7 +86,7 @@ jobs:
   # already completed/success when the platform reads the run jobs API.
   source_provenance:
     name: Publish Immutable Release And Source Provenance Carrier
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     timeout-minutes: 20
     permissions:
       actions: read
@@ -345,7 +345,7 @@ jobs:
   publish:
     name: Publish One Immutable Candidate And Upload Same Bytes To DEV
     needs: source_provenance
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     timeout-minutes: 20
     permissions:
       contents: read

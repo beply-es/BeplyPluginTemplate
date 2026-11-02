@@ -28,7 +28,7 @@ jobs:
   quality_contract:
     name: Quality Contract
     timeout-minutes: 10
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
 
     steps:
       - name: Checkout Plugin
@@ -47,8 +47,12 @@ jobs:
       - name: Validate release workflow model
         run: node scripts/ci/validate-release-model.mjs
 
+      # ARC's system Python has no PyYAML (GitHub-hosted images did); pinned, in a venv.
       - name: Unit test immutable plugin artifact contract
-        run: python3 -m unittest scripts/ci/test_immutable_plugin_contract.py
+        run: |
+          python3 -m venv "${RUNNER_TEMP}/contract-venv"
+          "${RUNNER_TEMP}/contract-venv/bin/pip" install --quiet --disable-pip-version-check 'PyYAML==6.0.2'
+          "${RUNNER_TEMP}/contract-venv/bin/python" -m unittest scripts/ci/test_immutable_plugin_contract.py
 
       - name: Unit test one Tests run per SHA and draft PR gating
         run: python3 .github/ci/test_tests_workflow_triggers.py
@@ -67,7 +71,7 @@ jobs:
     timeout-minutes: 10
     continue-on-error: true
     if: github.event.pull_request.draft != true
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
 
     steps:
       - name: Checkout Plugin
@@ -87,7 +91,7 @@ jobs:
     needs: quality_contract
     timeout-minutes: 10
     if: github.event.pull_request.draft != true
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     strategy:
       fail-fast: false
       matrix:
@@ -135,7 +139,7 @@ jobs:
     name: Unit FS ${{ matrix.facturascripts-ref }} PHP ${{ matrix.php-version }}
     needs: lint
     timeout-minutes: 20
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     strategy:
       fail-fast: false
       matrix:
@@ -243,7 +247,7 @@ jobs:
     name: Runtime FS ${{ matrix.facturascripts-ref }} PHP ${{ matrix.php-version }}
     needs: lint
     timeout-minutes: 20
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     strategy:
       fail-fast: false
       matrix:
@@ -358,7 +362,7 @@ jobs:
     name: E2E FS ${{ matrix.facturascripts-ref }}
     needs: lint
     timeout-minutes: 25
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     strategy:
       fail-fast: false
       matrix:

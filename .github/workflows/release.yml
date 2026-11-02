@@ -19,7 +19,7 @@ jobs:
   verify_tests:
     name: Verify Tests Workflow
     timeout-minutes: 50
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     steps:
       - name: Wait for exact Tests workflow
         env:
@@ -83,7 +83,7 @@ jobs:
     name: Documentation Release Audit
     needs: verify_tests
     timeout-minutes: 12
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
