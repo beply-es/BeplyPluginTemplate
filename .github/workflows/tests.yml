@@ -28,7 +28,7 @@ jobs:
   quality_contract:
     name: Quality Contract
     timeout-minutes: 10
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
 
     steps:
       - name: Checkout Plugin
@@ -67,7 +67,7 @@ jobs:
     timeout-minutes: 10
     continue-on-error: true
     if: github.event.pull_request.draft != true
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
 
     steps:
       - name: Checkout Plugin
@@ -87,7 +87,7 @@ jobs:
     needs: quality_contract
     timeout-minutes: 10
     if: github.event.pull_request.draft != true
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     strategy:
       fail-fast: false
       matrix:
@@ -135,7 +135,7 @@ jobs:
     name: Unit FS ${{ matrix.facturascripts-ref }} PHP ${{ matrix.php-version }}
     needs: lint
     timeout-minutes: 20
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     strategy:
       fail-fast: false
       matrix:
@@ -243,7 +243,7 @@ jobs:
     name: Runtime FS ${{ matrix.facturascripts-ref }} PHP ${{ matrix.php-version }}
     needs: lint
     timeout-minutes: 20
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     strategy:
       fail-fast: false
       matrix:
@@ -358,7 +358,7 @@ jobs:
     name: E2E FS ${{ matrix.facturascripts-ref }}
     needs: lint
     timeout-minutes: 25
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     strategy:
       fail-fast: false
       matrix:

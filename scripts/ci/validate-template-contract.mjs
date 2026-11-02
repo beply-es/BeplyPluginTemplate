@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 const root = process.cwd()
@@ -196,8 +196,21 @@ const testsWorkflow = readFileSync(resolve(root, '.github/workflows/tests.yml'),
 if (/paths-ignore:/.test(releaseWorkflow)) {
   fail('Release workflow must not ignore docs/tests paths; docs are part of the release contract')
 }
-if (isTemplate && !testsWorkflow.includes("vars.BEPLY_GHA_RUNNER || 'ubuntu-24.04'")) {
-  fail('Public template CI must retain a GitHub-hosted runner fallback')
+// TAREA-371: no plugin job may run on GitHub-hosted runners, and no variable
+// may move one there without a PR (`vars.X || 'arc-runner-set'` could). Only
+// the public template itself keeps its free hosted CI, by repository name.
+const ARC_ONLY_RUNNER = "${{ vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}"
+const TEMPLATE_TESTS_RUNNER = "${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}"
+const workflowsDir = resolve(root, '.github/workflows')
+for (const file of readdirSync(workflowsDir).filter((name) => /\.ya?ml$/.test(name)).sort()) {
+  const allowed = file === 'tests.yml' ? [TEMPLATE_TESTS_RUNNER] : [ARC_ONLY_RUNNER]
+  const lines = readFileSync(resolve(workflowsDir, file), 'utf8').split('\n')
+  lines.forEach((line, index) => {
+    const match = line.match(/^\s*runs-on:\s*(.*?)\s*$/)
+    if (match && !allowed.includes(match[1])) {
+      fail(`${file}:${index + 1} runs-on must be ${allowed[0]} (got ${match[1] || 'a block'})`)
+    }
+  })
 }
 
 if (errors.length > 0) {

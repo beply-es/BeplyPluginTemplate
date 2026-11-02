@@ -37,7 +37,15 @@ Variables recomendadas:
 
 | Variable | Uso |
 | --- | --- |
-| `BEPLY_GHA_RUNNER` | Runner para los workflows reutilizables |
+| `BEPLY_GHA_RUNNER` | Solo `arc-runner-prio` cambia algo: manda los jobs al conjunto prioritario de ARC. Cualquier otro valor, o ninguno, deja `arc-runner-set` |
+
+Ningún job corre en runners hospedados de GitHub (TAREA-371: sin presupuesto de
+Actions). Todo `runs-on` es `${{ vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' &&
+'arc-runner-prio' || 'arc-runner-set' }}`, que solo puede dar ARC: una variable
+puesta a `ubuntu-latest` no saca los jobs de ARC. La única excepción es `tests.yml`
+en la propia plantilla pública, que conserva su CI hospedada gratuita comparando
+`github.repository`; en cualquier copia esa rama nunca se cumple.
+`validate-template-contract.mjs` rechaza cualquier otra forma.
 
 ## Gates
 

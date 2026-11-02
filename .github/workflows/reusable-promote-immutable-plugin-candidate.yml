@@ -91,7 +91,7 @@ env:
 jobs:
   promote:
     name: Promote Exact DEV100 Bytes To PROD Pending Review
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     timeout-minutes: 20
     permissions:
       actions: read
