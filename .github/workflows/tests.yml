@@ -47,8 +47,12 @@ jobs:
       - name: Validate release workflow model
         run: node scripts/ci/validate-release-model.mjs
 
+      # ARC's system Python has no PyYAML (GitHub-hosted images did); pinned, in a venv.
       - name: Unit test immutable plugin artifact contract
-        run: python3 -m unittest scripts/ci/test_immutable_plugin_contract.py
+        run: |
+          python3 -m venv "${RUNNER_TEMP}/contract-venv"
+          "${RUNNER_TEMP}/contract-venv/bin/pip" install --quiet --disable-pip-version-check 'PyYAML==6.0.2'
+          "${RUNNER_TEMP}/contract-venv/bin/python" -m unittest scripts/ci/test_immutable_plugin_contract.py
 
       - name: Unit test one Tests run per SHA and draft PR gating
         run: python3 .github/ci/test_tests_workflow_triggers.py
