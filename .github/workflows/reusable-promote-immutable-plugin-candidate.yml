@@ -64,6 +64,11 @@ on:
       confirm:
         required: true
         type: string
+      require_artifact_signature:
+        description: Require signed artifact and dependency SBOM; never fall back to unsigned
+        required: false
+        default: false
+        type: boolean
     secrets:
       BEPLY_PROMOTION_GITHUB_TOKEN:
         required: false
@@ -129,6 +134,7 @@ jobs:
           ref: ${{ inputs.release_tag }}
           path: plugin
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Checkout immutable promotion contract
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -252,6 +258,8 @@ jobs:
       - name: Generate PROD attestation from existing immutable bytes
         id: attestation
         env:
+          REQUIRE_ARTIFACT_SIGNATURE: ${{ inputs.require_artifact_signature }}
+          PLUGIN_ROOT: plugin
           PLUGIN_NAME: ${{ steps.ini.outputs.name }}
           PLUGIN_VERSION: ${{ steps.ini.outputs.version }}
           PLUGIN_ZIP: /tmp/${{ steps.ini.outputs.name }}-v${{ steps.ini.outputs.version }}.zip
@@ -268,6 +276,7 @@ jobs:
       - name: Upload exact DEV100 bytes to PROD pending canonical approval
         id: upload_prod
         env:
+          REQUIRE_ARTIFACT_SIGNATURE: ${{ inputs.require_artifact_signature }}
           BEPLY_API_URL: ${{ inputs.prod_api_url }}
           BEPLY_CI_TOKEN: ${{ secrets.BEPLY_PROD_CI_TOKEN }}
           PLUGIN_NAME: ${{ steps.ini.outputs.name }}
@@ -284,6 +293,9 @@ jobs:
         run: |
           set -euo pipefail
           test -n "${BEPLY_CI_TOKEN}" || { echo "::error::BEPLY_PROD_CI_TOKEN is required"; exit 1; }
+          if [ "${REQUIRE_ARTIFACT_SIGNATURE}" = "true" ]; then
+            test "${HAS_ATTESTATION}" = "true" || { echo "::error::Release requires a signed artifact and dependency SBOM"; exit 1; }
+          fi
           ZIP="/tmp/${PLUGIN_NAME}-v${PLUGIN_VERSION}.zip"
           test "${{ steps.attestation.outputs.artifact_checksum }}" = "${CHECKSUM}" || { echo "::error::PROD attestation checksum drift"; exit 1; }
           CURL_FIELDS=(

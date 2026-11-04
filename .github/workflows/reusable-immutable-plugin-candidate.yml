@@ -37,6 +37,11 @@ on:
         required: false
         default: dev
         type: string
+      require_artifact_signature:
+        description: Require signed artifact and dependency SBOM; never fall back to unsigned
+        required: false
+        default: false
+        type: boolean
     secrets:
       BEPLY_DEV_CI_TOKEN:
         required: true
@@ -471,9 +476,19 @@ jobs:
               ;;
           esac
 
+      - name: Checkout exact source for strict dependency SBOM
+        if: inputs.require_artifact_signature
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.sha }}
+          path: plugin
+          persist-credentials: false
+
       - name: Generate DEV artifact attestation from immutable bytes
         id: attestation
         env:
+          REQUIRE_ARTIFACT_SIGNATURE: ${{ inputs.require_artifact_signature }}
+          PLUGIN_ROOT: plugin
           PLUGIN_NAME: ${{ needs.source_provenance.outputs.plugin_name }}
           PLUGIN_VERSION: ${{ needs.source_provenance.outputs.plugin_version }}
           PLUGIN_ZIP: /tmp/${{ needs.source_provenance.outputs.plugin_name }}-v${{ needs.source_provenance.outputs.plugin_version }}.zip
@@ -490,6 +505,7 @@ jobs:
       - name: Upload exact immutable bytes to DEV pending canonical approval
         id: upload_dev
         env:
+          REQUIRE_ARTIFACT_SIGNATURE: ${{ inputs.require_artifact_signature }}
           BEPLY_API_URL: ${{ inputs.dev_api_url }}
           BEPLY_CI_TOKEN: ${{ secrets.BEPLY_DEV_CI_TOKEN }}
           PLUGIN_NAME: ${{ needs.source_provenance.outputs.plugin_name }}
@@ -506,6 +522,9 @@ jobs:
         run: |
           set -euo pipefail
           test -n "${BEPLY_CI_TOKEN}" || { echo "::error::BEPLY_DEV_CI_TOKEN is required"; exit 1; }
+          if [ "${REQUIRE_ARTIFACT_SIGNATURE}" = "true" ]; then
+            test "${HAS_ATTESTATION}" = "true" || { echo "::error::Release requires a signed artifact and dependency SBOM"; exit 1; }
+          fi
           ZIP="/tmp/${PLUGIN_NAME}-v${PLUGIN_VERSION}.zip"
           test "${{ steps.attestation.outputs.artifact_checksum }}" = "${CHECKSUM}" || { echo "::error::DEV attestation checksum drift"; exit 1; }
           # The catalog row is read back against the bytes actually sent.
