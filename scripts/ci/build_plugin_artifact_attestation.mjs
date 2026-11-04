@@ -23,6 +23,7 @@ function sha256(value) {
 
 // Dependency inventory preserves strict56's Composer runtime / npm lock policy.
 function readJson(pathname, pluginRoot) {
+  if (!pathname) return null
   const stat = fs.lstatSync(pathname, { throwIfNoEntry: false })
   if (!stat) return null
   const relative = path.relative(pluginRoot, fs.realpathSync(pathname))

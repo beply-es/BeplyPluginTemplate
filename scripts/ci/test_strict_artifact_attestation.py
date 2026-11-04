@@ -99,6 +99,25 @@ class StrictArtifactAttestationTests(unittest.TestCase):
             verify = subprocess.run(['node', '-e', code], input=json.dumps({'public': self.keys['public'], 'signature': out['artifact_signature'], 'payload': changed}), text=True, capture_output=True)
             self.assertEqual(expected, verify.returncode)
 
+    def test_missing_locks_preserve_the_empty_or_partial_inventory(self):
+        composer = self.composer.read_text()
+        npm = self.npm.read_text()
+        for has_composer, has_npm, expected in ((True, False, 1), (False, True, 1), (False, False, 0)):
+            with self.subTest(composer=has_composer, npm=has_npm):
+                self.composer.unlink(missing_ok=True)
+                self.npm.unlink(missing_ok=True)
+                if has_composer:
+                    self.composer.write_text(composer)
+                if has_npm:
+                    self.npm.write_text(npm)
+                run, out = self.invoke()
+                self.assertEqual(0, run.returncode, run.stderr)
+                self.assertEqual('true', out['has_attestation'])
+                self.assertEqual(str(expected), out['sbom_component_count'])
+                sbom = json.loads(self.sbom.read_text())
+                self.assertEqual(expected, len(sbom['components']))
+                self.assertEqual(expected, len(sbom['dependencies'][0]['dependsOn']))
+
     def test_bad_lock_data_and_links_fail_closed(self):
         original = self.composer.read_text()
         cases = ['invalid-json', 'null', 'false', '[]', json.dumps({'packages': 'unknown'}), json.dumps({'packages': [{'name': 'fixture/no-version'}]}), json.dumps({'packages': [{'name': 123, 'version': '1.2'}]}), json.dumps({'packages': [{'name': 'fixture/library', 'version': True}]})]
