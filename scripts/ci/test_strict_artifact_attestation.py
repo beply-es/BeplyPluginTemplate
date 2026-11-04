@@ -136,6 +136,17 @@ class StrictArtifactAttestationTests(unittest.TestCase):
         self.assertNotEqual(0, run.returncode)
         self.assertEqual({}, values)
 
+    def test_npm_links_cannot_be_misreported_as_missing_inventory(self):
+        self.npm.unlink()
+        root_lock = self.plugin / 'package-lock.json'
+        for target in (self.directory / 'missing.lock', self.composer):
+            with self.subTest(target=target.name):
+                root_lock.unlink(missing_ok=True)
+                root_lock.symlink_to(target)
+                run, values = self.invoke()
+                self.assertNotEqual(0, run.returncode)
+                self.assertEqual({}, values)
+
     def test_invalid_policy_or_missing_source_root_cannot_downgrade(self):
         for changes in ({'strict': 'TRUE'}, {'PLUGIN_ROOT': ''}):
             with self.subTest(changes=changes):

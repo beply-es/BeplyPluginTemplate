@@ -86,7 +86,7 @@ function lockedDependencies(pluginRoot) {
   }
 
   const npmCandidates = [path.join(pluginRoot, 'package-lock.json'), path.join(pluginRoot, 'tests/package-lock.json')]
-  const npmPath = npmCandidates.find(candidate => fs.existsSync(candidate))
+  const npmPath = npmCandidates.find(candidate => fs.lstatSync(candidate, { throwIfNoEntry: false }))
   const npm = readJson(npmPath, pluginRoot)
   if (npm && npmPath) {
     if (!npm.packages || typeof npm.packages !== 'object' || Array.isArray(npm.packages)) {
