@@ -101,7 +101,7 @@ class StrictArtifactAttestationTests(unittest.TestCase):
 
     def test_bad_lock_data_and_links_fail_closed(self):
         original = self.composer.read_text()
-        cases = ['invalid-json', 'null', 'false', '[]', json.dumps({'packages': 'unknown'}), json.dumps({'packages': [{'name': 'fixture/no-version'}]})]
+        cases = ['invalid-json', 'null', 'false', '[]', json.dumps({'packages': 'unknown'}), json.dumps({'packages': [{'name': 'fixture/no-version'}]}), json.dumps({'packages': [{'name': 123, 'version': '1.2'}]}), json.dumps({'packages': [{'name': 'fixture/library', 'version': True}]})]
         for bad in cases:
             with self.subTest(lock=bad):
                 self.composer.write_text(bad)

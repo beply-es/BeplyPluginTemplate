@@ -65,9 +65,11 @@ function lockedDependencies(pluginRoot) {
     if (!Array.isArray(composer.packages)) throw new Error('Composer lock packages must be an array')
     lockHashes.push({ name: 'beply:composerLockSha256', value: sha256(fs.readFileSync(composerPath)) })
     for (const item of Array.isArray(composer.packages) ? composer.packages : []) {
-      const name = String(item?.name || '')
-      const version = String(item?.version || '')
-      if (!name || !version) throw new Error('Locked dependency identity is incomplete')
+      const name = item?.name
+      const version = item?.version
+      if (typeof name !== 'string' || !name.trim() || typeof version !== 'string' || !version.trim()) {
+        throw new Error('Locked dependency identity is incomplete')
+      }
       const [group = '', packageName = name] = name.split('/', 2)
       const ref = dependencyRef('composer', name, version)
       byRef.set(ref, {
@@ -94,8 +96,10 @@ function lockedDependencies(pluginRoot) {
       if (!lockPath) continue
       if (!item || typeof item !== 'object') throw new Error('Locked dependency identity is incomplete')
       const name = packageNameFromLockPath(lockPath, item.name)
-      const version = String(item.version || '')
-      if (!name || !version) throw new Error('Locked dependency identity is incomplete')
+      const version = item.version
+      if (typeof name !== 'string' || !name.trim() || typeof version !== 'string' || !version.trim()) {
+        throw new Error('Locked dependency identity is incomplete')
+      }
       const ref = dependencyRef('npm', name, version)
       const scope = item.dev === true ? 'development' : 'runtime'
       const existing = byRef.get(ref)
