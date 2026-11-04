@@ -656,6 +656,16 @@ case "$*" in
 esac
 """
 
+    def test_strict_signature_policy_stops_unsigned_before_post(self):
+        result, calls, output, _ = self._run(require_signature="true", attestation="false")
+        self.assertNotEqual(0, result.returncode)
+        self.assertEqual([], calls)
+        self.assertEqual("", output)
+        result, calls, output, _ = self._run(require_signature="true", attestation="true")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(2, len(calls))
+        self.assertIn("candidate_evidence_json=", output)
+
     def _step(self, step_id: str = "upload_dev"):
         path = self.ROOT / ".github/workflows/reusable-immutable-plugin-candidate.yml"
         publish = yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"]["publish"]
@@ -680,7 +690,7 @@ esac
     def _run(self, rows=None, *, kind="plugin_version", post_code="201", get_code="200",
              pending=None, checksum=None, file_size=None, attestation="false", provenance="false",
              releases=None, witness_code="200", witness=None, witness_changes=None, gh_exit="0",
-             token="fixture-token"):
+             token="fixture-token", require_signature="false"):
         name = "ReadbackFixture" + uuid.uuid4().hex[:12]
         payload = b"PK\x03\x04 immutable fixture bytes"
         asset = Path("/tmp") / f"{name}-v{self.VERSION}.zip"
@@ -746,6 +756,7 @@ esac
             "FILE_SIZE": str(file_size if file_size is not None else len(payload)),
             "RELEASE_TRACK": "main",
             "HAS_ATTESTATION": attestation,
+            "REQUIRE_ARTIFACT_SIGNATURE": require_signature,
             "SOURCE_PUBLISHED_AT": "2026-10-08T00:00:00Z",
             "SUBMIT_SOURCE_PROVENANCE": provenance,
             "SOURCE_PROVENANCE_ENVIRONMENT": "dev",
@@ -1008,6 +1019,59 @@ class ReusableWorkflowToolingTests(unittest.TestCase):
                         body,
                         f"{path.name}: se declara SHA-256 pero no se verifica",
                     )
+
+
+class StrictWorkflowTests(unittest.TestCase):
+    ROOT = Path(__file__).resolve().parents[2]
+    def workflows(self):
+        for name, job, upload in (('reusable-immutable-plugin-candidate.yml', 'publish', 'upload_dev'),
+                                  ('reusable-promote-immutable-plugin-candidate.yml', 'promote', 'upload_prod')):
+            doc = yaml.safe_load((self.ROOT / '.github/workflows' / name).read_text())
+            yield name, doc, doc['jobs'][job], upload
+
+    def test_optional_input_reaches_attester_and_upload_in_both_environments(self):
+        for name, doc, job, upload_id in self.workflows():
+            with self.subTest(workflow=name):
+                trigger = doc.get('on', doc.get(True))
+                self.assertEqual({'description': 'Require signed artifact and dependency SBOM; never fall back to unsigned', 'required': False, 'default': False, 'type': 'boolean'}, trigger['workflow_call']['inputs'].get('require_artifact_signature'))
+                for step_id in ('attestation', upload_id):
+                    step = next(s for s in job['steps'] if s.get('id') == step_id)
+                    self.assertEqual('${{ inputs.require_artifact_signature }}', step['env'].get('REQUIRE_ARTIFACT_SIGNATURE'))
+                attest = next(s for s in job['steps'] if s.get('id') == 'attestation')
+                self.assertEqual('plugin', attest['env'].get('PLUGIN_ROOT'))
+                checkouts = [s for s in job['steps'] if s.get('with', {}).get('path') == 'plugin']
+                self.assertEqual(1, len(checkouts))
+                self.assertEqual(False, checkouts[0]['with'].get('persist-credentials'))
+                expected_ref = '${{ github.sha }}' if upload_id == 'upload_dev' else '${{ inputs.release_tag }}'
+                self.assertEqual(expected_ref, checkouts[0]['with'].get('ref'))
+                if upload_id == 'upload_dev':
+                    self.assertEqual('inputs.require_artifact_signature', checkouts[0].get('if'))
+
+    def test_unsigned_result_cannot_reach_either_upload_when_strict(self):
+        for name, _doc, job, upload_id in self.workflows():
+            with self.subTest(workflow=name):
+                step = next(s for s in job['steps'] if s.get('id') == upload_id)
+                script = re.sub(r'\$\{\{.*?\}\}', 'synthetic', step['run'])
+                script = 'curl(){ echo UNEXPECTED_NETWORK; exit 99; };\n'+script
+                env = {key: 'fixture' for key in step['env']}
+                env.update(PATH=os.environ['PATH'], BEPLY_CI_TOKEN='fixture', CHECKSUM='synthetic',
+                           REQUIRE_ARTIFACT_SIGNATURE='true', HAS_ATTESTATION='false')
+                run = subprocess.run(['bash', '-c', script], env=env, text=True, capture_output=True)
+                self.assertEqual(1, run.returncode)
+                self.assertNotIn('UNEXPECTED_NETWORK', run.stdout+run.stderr)
+                self.assertIn('signed artifact and dependency SBOM', run.stderr+run.stdout)
+
+
+    def test_strict_suite_is_blocking_in_ci(self):
+        tests = yaml.safe_load((self.ROOT / '.github/workflows/tests.yml').read_text())
+        job = tests['jobs']['quality_contract']
+        self.assertNotEqual(True, job.get('continue-on-error'))
+        self.assertNotIn('if', job)
+        step = next(s for s in job['steps'] if s.get('name') == 'Unit test immutable plugin artifact contract')
+        self.assertNotIn('if', step)
+        self.assertNotEqual(True, step.get('continue-on-error'))
+        self.assertIn('scripts/ci/test_strict_artifact_attestation.py', step['run'])
+        self.assertNotIn('||', step['run'])
 
 
 class RuntimePhpContractTests(unittest.TestCase):

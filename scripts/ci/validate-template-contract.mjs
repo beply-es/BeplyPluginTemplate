@@ -67,6 +67,7 @@ for (const path of [
   'scripts/ci/build_plugin_artifact_attestation.mjs',
   'scripts/ci/immutable_plugin_contract.py',
   'scripts/ci/test_immutable_plugin_contract.py',
+  'scripts/ci/test_strict_artifact_attestation.py',
   'scripts/template/sync-template.mjs',
 ]) {
   requireFile(path)
@@ -211,6 +212,16 @@ for (const file of readdirSync(workflowsDir).filter((name) => /\.ya?ml$/.test(na
       fail(`${file}:${index + 1} runs-on must be ${allowed[0]} (got ${match[1] || 'a block'})`)
     }
   })
+}
+
+// The shared attester's strict policy must execute, never become a green skip.
+if (isTemplate) {
+  const quality = testsWorkflow.split('\n  quality_contract:')[1]?.split('\n  php84_compat:')[0] || ''
+  const step = quality.match(/      - name: Unit test immutable plugin artifact contract\n([\s\S]*?)(?=\n      - |$)/)?.[1] || ''
+  if (!/^\s*"\$\{RUNNER_TEMP\}\/contract-venv\/bin\/python" -m unittest scripts\/ci\/test_immutable_plugin_contract\.py scripts\/ci\/test_strict_artifact_attestation\.py$/m.test(step)
+      || /(?:^|\n)\s*(?:if|continue-on-error):/.test(step)) {
+    fail('Strict artifact attestation tests must run unconditionally without error masking')
+  }
 }
 
 if (errors.length > 0) {

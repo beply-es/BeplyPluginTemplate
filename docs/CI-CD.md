@@ -47,6 +47,18 @@ en la propia plantilla pública, que conserva su CI hospedada gratuita comparand
 `github.repository`; en cualquier copia esa rama nunca se cumple.
 `validate-template-contract.mjs` rechaza cualquier otra forma.
 
+## Modo firmado estricto
+
+Los dos reusables aceptan `require_artifact_signature: true`, desactivado por defecto. Es un contrato de publicación: obliga a una firma y a un SBOM con inventario de dependencias bloqueadas. No permite sustituir el pin de un consumidor con política obligatoria por uno que solo comprueba que existan claves. Candidato y promoción deben consumir el mismo SHA revisado; la política se activa explícitamente en ambos adaptadores y en su lock.
+
+En modo estricto son obligatorias la clave y su identificador existentes en cada entorno. El helper firma el checksum del ZIP y el del SBOM; el paso de upload vuelve a exigir `has_attestation=true` antes del POST. No crea ni rota claves. Con la política por defecto, el SBOM y la firma opcional conservan su formato anterior byte a byte.
+
+El inventario estricto conserva la política de `56b843`: paquetes runtime de `composer.lock` y paquetes npm de `package-lock.json` o, si falta, `tests/package-lock.json`, con sus versiones, scopes, hashes de lock y relaciones de dependencia. Los JSON inválidos, inventarios sin forma conocida, identidades incompletas y locks enlazados fuera de la fuente fallan antes de emitir la atestación. Un proyecto sin esos locks declara inventario vacío, sin inventar dependencias. Esto no sustituye el análisis de dependencias no representadas por esos formatos.
+
+DEV obtiene los locks del checkout del SHA exacto del candidato; PROD conserva el checkout del tag que se contrasta con el SHA DEV100. Ese checkout no persiste credenciales. El ZIP sigue siendo el asset inmutable ya medido: no se reconstruye al firmar o promover. Las guardas de identidad previa, lectura de fila pendiente, procedencia y DEV100 permanecen bloqueantes. Un fallo después de publicar el asset conserva ese asset para reconciliación; no autoriza repetir el efecto ni mover el tag.
+
+La prueba del helper usa claves efímeras sintéticas que nunca escribe ni imprime. Prueba la firma contra la clave pública, alteración del payload, SBOM con Composer/npm, locks inválidos y el golden exacto del modo por defecto. Las pruebas de workflow ejecutan las guardas reales de DEV/PROD con transporte falso y comprueban que el modo estricto se propaga al firmador y al escritor. La migración de Tesorería o de cualquier otro consumidor sigue necesitando su PR, revisión, CI y prueba funcional propias.
+
 ## Gates
 
 `Tests` valida:
