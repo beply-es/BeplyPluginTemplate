@@ -38,6 +38,12 @@ EXCLUDED_NAMES = {
 PLUGIN_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*$")
 PLUGIN_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+$")
 FIXED_ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
+SUPPLY_CHAIN_DIR = Path(".beply/supply-chain")
+SUPPLY_CHAIN_LOCKS = (
+    (Path("composer.lock"), SUPPLY_CHAIN_DIR / "composer.lock"),
+    (Path("package-lock.json"), SUPPLY_CHAIN_DIR / "package-lock.json"),
+    (Path("tests/package-lock.json"), SUPPLY_CHAIN_DIR / "package-lock.json"),
+)
 
 
 class BuildError(RuntimeError):
@@ -69,6 +75,7 @@ def build_plugin_zip(
     output_path: Path,
     plugin_name: str,
     plugin_version: str,
+    include_supply_chain: bool = False,
 ) -> dict[str, Any]:
     plugin_root = plugin_root.resolve()
     output_path = output_path.resolve()
@@ -80,6 +87,8 @@ def build_plugin_zip(
         raise BuildError("plugin version must use X.Y")
     if not (plugin_root / "facturascripts.ini").is_file():
         raise BuildError("facturascripts.ini is missing")
+    if include_supply_chain and (plugin_root / SUPPLY_CHAIN_DIR).exists():
+        raise BuildError("supply-chain snapshot directory is reserved")
 
     payload: list[tuple[Path, Path]] = []
     for path in sorted(plugin_root.rglob("*"), key=lambda item: item.as_posix()):
@@ -91,6 +100,17 @@ def build_plugin_zip(
         payload.append((relative, path))
     if not payload:
         raise BuildError("plugin payload is empty")
+
+    if include_supply_chain:
+        snapshots: dict[Path, Path] = {}
+        for source_relative, archive_relative in SUPPLY_CHAIN_LOCKS:
+            source = plugin_root / source_relative
+            if source.is_symlink():
+                raise BuildError(f"symlinked supply-chain lock is forbidden: {source_relative}")
+            if source.is_file():
+                snapshots.setdefault(archive_relative, source)
+        payload.extend(sorted(snapshots.items(), key=lambda item: item[0].as_posix()))
+        payload.sort(key=lambda item: item[0].as_posix())
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with ZipFile(output_path, "w", compression=ZIP_DEFLATED, compresslevel=9) as archive:
@@ -136,6 +156,7 @@ def main() -> int:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--plugin-name", required=True)
     parser.add_argument("--plugin-version", required=True)
+    parser.add_argument("--include-supply-chain", choices=("true", "false"), default="false")
     args = parser.parse_args()
     try:
         result = build_plugin_zip(
@@ -143,6 +164,7 @@ def main() -> int:
             args.output,
             args.plugin_name,
             args.plugin_version,
+            include_supply_chain=args.include_supply_chain == "true",
         )
     except BuildError as exc:
         parser.error(str(exc))

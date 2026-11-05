@@ -252,6 +252,7 @@ jobs:
           --plugin-root plugin
           --plugin-name "${{ steps.ini.outputs.name }}"
           --plugin-version "${{ steps.ini.outputs.version }}"
+          --include-supply-chain "${{ inputs.require_artifact_signature }}"
           --output "/tmp/build/${{ steps.ini.outputs.name }}-v${{ steps.ini.outputs.version }}.zip"
 
       - name: Create immutable GitHub Release asset

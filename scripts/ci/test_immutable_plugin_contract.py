@@ -243,6 +243,50 @@ class ImmutableIdentityTests(unittest.TestCase):
 
 
 class DeterministicPluginZipTests(unittest.TestCase):
+    def test_signed_package_carries_exact_locks_and_keeps_default_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "plugin"
+            (root / "tests").mkdir(parents=True)
+            (root / "facturascripts.ini").write_text("name = BeplyDemo\nversion = 1.2\n")
+            (root / "composer.lock").write_bytes(b'{"packages":[]}\n')
+            (root / "tests/package-lock.json").write_bytes(b'{"packages":{}}\n')
+            output = Path(tmp) / "candidate.zip"
+            build_plugin_zip(root, output, "BeplyDemo", "1.2")
+            with ZipFile(output) as archive:
+                self.assertNotIn("BeplyDemo/.beply/supply-chain/package-lock.json", archive.namelist())
+            first = build_plugin_zip(root, output, "BeplyDemo", "1.2", include_supply_chain=True)
+            with ZipFile(output) as archive:
+                self.assertEqual(archive.read("BeplyDemo/.beply/supply-chain/composer.lock"), b'{"packages":[]}\n')
+                self.assertEqual(archive.read("BeplyDemo/.beply/supply-chain/package-lock.json"), b'{"packages":{}}\n')
+                self.assertNotIn("BeplyDemo/tests/package-lock.json", archive.namelist())
+            self.assertEqual(first, build_plugin_zip(root, output, "BeplyDemo", "1.2", include_supply_chain=True))
+            (root / "package-lock.json").write_bytes(b'{"packages":{"":{}}}\n')
+            build_plugin_zip(root, output, "BeplyDemo", "1.2", include_supply_chain=True)
+            with ZipFile(output) as archive:
+                self.assertEqual(archive.read("BeplyDemo/.beply/supply-chain/package-lock.json"), b'{"packages":{"":{}}}\n')
+
+    def test_signed_package_rejects_preexisting_reserved_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "plugin"
+            (root / ".beply/supply-chain").mkdir(parents=True)
+            (root / "facturascripts.ini").write_text("name = BeplyDemo\nversion = 1.2\n")
+            (root / ".beply/supply-chain/composer.lock").write_text("untrusted")
+            with self.assertRaises(BuildError):
+                build_plugin_zip(root, Path(tmp) / "candidate.zip", "BeplyDemo", "1.2", include_supply_chain=True)
+
+    def test_signed_package_rejects_symlinked_test_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "plugin"
+            (root / "tests").mkdir(parents=True)
+            (root / "facturascripts.ini").write_text("name = BeplyDemo\nversion = 1.2\n")
+            (root / "tests/package-lock.json").symlink_to(Path(tmp) / "outside")
+            with self.assertRaises(BuildError):
+                build_plugin_zip(root, Path(tmp) / "candidate.zip", "BeplyDemo", "1.2", include_supply_chain=True)
+
+    def test_workflow_binds_snapshots_to_signed_policy(self) -> None:
+        workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/reusable-immutable-plugin-candidate.yml").read_text()
+        self.assertIn('--include-supply-chain "${{ inputs.require_artifact_signature }}"', workflow)
+
     def test_builds_one_deterministic_payload_without_tooling(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "plugin"
