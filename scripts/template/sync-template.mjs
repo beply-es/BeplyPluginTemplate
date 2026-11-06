@@ -68,8 +68,8 @@ try {
   const sourceCommit = gitHead(templateRoot)
   if (apply) {
     const top = gitTopLevel(templateRoot)
-    if (!/^[0-9a-f]{40}$/.test(sourceCommit) || top !== resolve(templateRoot) || isGitDirty(templateRoot)) {
-      throw new Error('template must be a clean Git checkout with a known commit')
+    if (!/^[0-9a-f]{40}$/.test(sourceCommit) || top !== resolve(templateRoot) || !isPristineTemplate(templateRoot)) {
+      throw new Error('template must be a pristine Git checkout with a known commit')
     }
     if (/^[0-9a-f]{40}$/.test(targetRef) && targetRef !== sourceCommit) {
       throw new Error('template ref does not match checkout commit')
@@ -167,6 +167,16 @@ function gitHead(cwd) {
     }).trim()
   } catch {
     return ''
+  }
+}
+
+function isPristineTemplate(cwd) {
+  try {
+    return execFileSync('git', ['status', '--porcelain', '--ignored'], {
+      cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim() === ''
+  } catch {
+    return false
   }
 }
 

@@ -68,6 +68,24 @@ class TemplateSyncShaTest(unittest.TestCase):
             lock = json.loads((target / '.beply/template-lock.json').read_text())
             self.assertEqual(expected, lock['sha'])
 
+    def test_ignored_template_content_cannot_masquerade_as_the_commit(self):
+        with tempfile.TemporaryDirectory(prefix='t371-template-ignored-') as tmp:
+            root = Path(tmp); source = root / 'source'; target = root / 'target'
+            (source / '.beply').mkdir(parents=True); (target / '.beply').mkdir(parents=True)
+            (source / '.beply/template-sync.json').write_text('{"overwrite": [], "createIfMissing": []}')
+            (source / '.gitignore').write_text('secret-ignored.txt\n')
+            lock = target / '.beply/template-lock.json'; lock.write_text('{"sha":"old"}')
+            subprocess.run(['git', 'init', '-q', str(source)], check=True)
+            subprocess.run(['git', '-C', str(source), 'add', '.'], check=True)
+            subprocess.run(['git', '-C', str(source), '-c', 'user.name=Test', '-c',
+                            'user.email=test@example.invalid', 'commit', '-qm', 'fixture'], check=True)
+            expected = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
+            (source / 'secret-ignored.txt').write_text('not part of the commit')
+            result = subprocess.run(['node', str(SYNC), '--template-root', str(source), '--ref', expected,
+                                     '--apply'], cwd=target, capture_output=True, text=True)
+            self.assertNotEqual(0, result.returncode)
+            self.assertEqual('{"sha":"old"}', lock.read_text())
+
 
 if __name__ == '__main__':
     unittest.main()
