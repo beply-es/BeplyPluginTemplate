@@ -46,6 +46,10 @@ puesta a `ubuntu-latest` no saca los jobs de ARC. La única excepción es `tests
 en la propia plantilla pública, que conserva su CI hospedada gratuita comparando
 `github.repository`; en cualquier copia esa rama nunca se cumple.
 `validate-template-contract.mjs` rechaza cualquier otra forma.
+La prueba `test_reusable_runners.py` descubre los workflows con `workflow_call`
+independientemente de su nombre o extensión YAML y exige el selector ARC
+cerrado en cada job. Falla ante claves duplicadas, alias o reusables anidados
+sin revisar; un plugin que solo llama workflows remotos no necesita copiarlos.
 
 ## Gates
 
