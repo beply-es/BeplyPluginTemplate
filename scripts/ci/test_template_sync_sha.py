@@ -1,5 +1,9 @@
 import json
+import os
+import shlex
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -76,7 +80,7 @@ class TemplateSyncShaTest(unittest.TestCase):
                             'user.email=test@example.invalid', 'commit', '-qm', 'fixture'], check=True)
             expected = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
             result = subprocess.run(['node', str(SYNC), '--template-root', str(source), '--apply'],
-                                    cwd=target, capture_output=True, text=True, env={'PATH': '/usr/bin:/bin'})
+                                    cwd=target, capture_output=True, text=True, env={'PATH': os.environ.get('PATH', '')})
             self.assertEqual(0, result.returncode, result.stderr)
             lock = json.loads((target / '.beply/template-lock.json').read_text())
             self.assertEqual((expected, expected, expected), (lock['ref'], lock['sha'], lock['commit']))
@@ -103,6 +107,21 @@ class TemplateSyncShaTest(unittest.TestCase):
                                     cwd=target, capture_output=True, text=True)
             self.assertNotEqual(0, result.returncode)
             self.assertEqual('{"sha":"unchanged"}', lock.read_text())
+
+    def test_local_checkout_uses_node_from_the_configured_toolchain_path(self):
+        node = shutil.which('node')
+        self.assertIsNotNone(node)
+        with tempfile.TemporaryDirectory(prefix='t371-template-node-path-') as tmp:
+            root = Path(tmp); marker = root / 'node-used'; wrapper = root / 'node'
+            wrapper.write_text('#!/bin/sh\n: > ' + shlex.quote(str(marker)) + '\nexec '
+                               + shlex.quote(node) + ' "$@"\n')
+            wrapper.chmod(0o755)
+            env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ.get('PATH', ''))
+            result = subprocess.run([sys.executable, '-m', 'unittest',
+                                     __name__ + '.TemplateSyncShaTest.test_local_checkout_without_ref_records_its_commit', '-q'],
+                                    capture_output=True, text=True, env=env)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertTrue(marker.is_file(), 'the configured Node executable must run')
 
     def test_dirty_or_mismatched_source_fails_before_writing_lock(self):
         with tempfile.TemporaryDirectory(prefix='t371-template-dirty-') as tmp:
