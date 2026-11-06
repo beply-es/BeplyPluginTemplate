@@ -53,6 +53,7 @@ jobs:
           python3 -m venv "${RUNNER_TEMP}/contract-venv"
           "${RUNNER_TEMP}/contract-venv/bin/pip" install --quiet --disable-pip-version-check 'PyYAML==6.0.2'
           "${RUNNER_TEMP}/contract-venv/bin/python" -m unittest scripts/ci/test_immutable_plugin_contract.py
+          "${RUNNER_TEMP}/contract-venv/bin/python" -m unittest scripts.ci.test_package_policy scripts.ci.test_template_sync_sha
 
       - name: Unit test one Tests run per SHA and draft PR gating
         run: python3 .github/ci/test_tests_workflow_triggers.py

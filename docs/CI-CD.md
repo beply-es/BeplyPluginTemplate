@@ -2,6 +2,12 @@
 
 ## Modelo build-once
 
+Por defecto el ZIP excluye `scripts/`. Un plugin que necesita directorios de
+runtime puede declararlos en `.beply/package-policy.json`, por ejemplo
+`{"schema":1,"includeScripts":["runtime"]}`. Solo se incorporan los
+subdirectorios declarados; siguen excluidos los archivos prohibidos y los
+enlaces simbólicos. La ausencia de política conserva la exclusión completa.
+
 - `main` y pull requests solo validan; no publican candidatos.
 - Un tag inmutable `vX.Y`, coincidente con `facturascripts.ini version`, construye un unico ZIP determinista.
 - Ese ZIP se publica como asset del GitHub Release y los mismos bytes se suben a DEV `pending_review`.
