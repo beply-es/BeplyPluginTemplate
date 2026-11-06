@@ -55,7 +55,7 @@ env:
 jobs:
   publish:
     name: Publish One Immutable Candidate And Upload Same Bytes To DEV
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     timeout-minutes: 20
     permissions:
       contents: write
