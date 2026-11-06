@@ -53,12 +53,28 @@ try {
     }
 
     tempDir = mkdtempSync(resolve(tmpdir(), 'beply-template-'))
-    execFileSync('git', ['clone', '--depth', '1', '--branch', targetRef, repo, tempDir], {
-      stdio: 'inherit',
-    })
+    if (/^[0-9a-f]{40}$/.test(targetRef)) {
+      execFileSync('git', ['init', '-q', tempDir], { stdio: 'inherit' })
+      execFileSync('git', ['-C', tempDir, 'fetch', '--depth', '1', '--', repo, targetRef], { stdio: 'inherit' })
+      execFileSync('git', ['-C', tempDir, 'checkout', '--detach', 'FETCH_HEAD'], { stdio: 'inherit' })
+    } else {
+      execFileSync('git', ['clone', '--depth', '1', '--branch', targetRef, repo, tempDir], {
+        stdio: 'inherit',
+      })
+    }
     templateRoot = tempDir
   }
 
+  const sourceCommit = gitHead(templateRoot)
+  if (apply) {
+    const top = gitTopLevel(templateRoot)
+    if (!/^[0-9a-f]{40}$/.test(sourceCommit) || top !== resolve(templateRoot) || isGitDirty(templateRoot)) {
+      throw new Error('template must be a clean Git checkout with a known commit')
+    }
+    if (/^[0-9a-f]{40}$/.test(targetRef) && targetRef !== sourceCommit) {
+      throw new Error('template ref does not match checkout commit')
+    }
+  }
   const policy = readJson(resolve(templateRoot, '.beply/template-sync.json'))
   const overwrite = unique(policy.overwrite || [])
   const createIfMissing = unique(policy.createIfMissing || [])
@@ -99,7 +115,7 @@ try {
     console.log(`${operation.mode} ${operation.path}`)
   }
 
-  updateTemplateLock({ repo, targetRef, templateRoot })
+  updateTemplateLock({ repo, targetRef, templateRoot, sourceCommit })
   console.log('Template sync complete. Review git diff and run tests.')
 } finally {
   if (tempDir) {
@@ -154,6 +170,14 @@ function gitHead(cwd) {
   }
 }
 
+function gitTopLevel(cwd) {
+  try {
+    return resolve(execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim())
+  } catch {
+    return ''
+  }
+}
+
 function printPlan({ templateRoot, targetRef, overwrite, createIfMissing, neverOverwrite }) {
   console.log(`Template source: ${templateRoot}`)
   console.log(`Template ref: ${targetRef || '(local)'}`)
@@ -171,7 +195,7 @@ function printPlan({ templateRoot, targetRef, overwrite, createIfMissing, neverO
   }
 }
 
-function updateTemplateLock({ repo, targetRef, templateRoot }) {
+function updateTemplateLock({ repo, targetRef, templateRoot, sourceCommit }) {
   const lockPath = resolve(root, '.beply/template-lock.json')
   const sourceLockPath = resolve(templateRoot, '.beply/template-lock.json')
   const sourceLock = existsSync(sourceLockPath) ? readJson(sourceLockPath) : {}
@@ -180,7 +204,8 @@ function updateTemplateLock({ repo, targetRef, templateRoot }) {
     template: sourceLock.template || repo,
     version: sourceLock.version || targetRef.replace(/^v/, ''),
     ref: targetRef || sourceLock.ref || '',
-    commit: gitHead(templateRoot),
+    commit: sourceCommit,
+    sha: sourceCommit,
     syncedAt: new Date().toISOString(),
     mode: 'initial-scaffold-plus-controlled-tooling-sync',
   }

@@ -26,6 +26,8 @@
     "scripts/ci/fixtures/source-provenance-manifest.golden.json",
     "scripts/ci/immutable_plugin_contract.py",
     "scripts/ci/test_immutable_plugin_contract.py",
+    "scripts/ci/test_package_policy.py",
+    "scripts/ci/test_template_sync_sha.py",
     "scripts/ci/validate-docs-impact.mjs",
     "scripts/ci/validate-release-model.mjs",
     "scripts/ci/validate-template-contract.mjs",
