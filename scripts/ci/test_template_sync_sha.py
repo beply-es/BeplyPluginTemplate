@@ -8,6 +8,41 @@ SYNC = Path(__file__).resolve().parents[1] / 'template' / 'sync-template.mjs'
 
 
 class TemplateSyncShaTest(unittest.TestCase):
+    def test_named_ref_must_resolve_to_the_checkout_before_any_copy(self):
+        with tempfile.TemporaryDirectory(prefix='t371-template-named-ref-') as tmp:
+            root = Path(tmp); source = root / 'source'; target = root / 'target'
+            (source / '.beply').mkdir(parents=True); (target / '.beply').mkdir(parents=True)
+            (source / '.beply/template-sync.json').write_text('{"overwrite": ["payload.txt"], "createIfMissing": []}')
+            (source / 'payload.txt').write_text('old')
+            original_lock = '{"sha":"unchanged"}'
+            (target / '.beply/template-lock.json').write_text(original_lock)
+            (target / 'payload.txt').write_text('untouched')
+            subprocess.run(['git', 'init', '-q', str(source)], check=True)
+            def git(*args):
+                return subprocess.check_output(['git', '-C', str(source), *args], text=True).strip()
+            git('add', '.')
+            git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'old')
+            git('tag', 'v1.5')
+            (source / 'payload.txt').write_text('new')
+            git('add', 'payload.txt')
+            git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'new')
+            head = git('rev-parse', 'HEAD')
+            git('tag', 'v1.6')
+            def sync(ref):
+                return subprocess.run(['node', str(SYNC), '--template-root', str(source), '--ref', ref,
+                                       '--apply'], cwd=target, capture_output=True, text=True)
+            for ref in ('v1.5', 'missing-ref'):
+                with self.subTest(ref=ref):
+                    result = sync(ref)
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertEqual('untouched', (target / 'payload.txt').read_text())
+                    self.assertEqual(original_lock, (target / '.beply/template-lock.json').read_text())
+            result = sync('v1.6')
+            self.assertEqual(0, result.returncode, result.stderr)
+            lock = json.loads((target / '.beply/template-lock.json').read_text())
+            self.assertEqual(('v1.6', head, head), (lock['ref'], lock['sha'], lock['commit']))
+            self.assertEqual('new', (target / 'payload.txt').read_text())
+
     def test_sync_records_the_actual_source_commit_as_sha(self):
         with tempfile.TemporaryDirectory(prefix='t371-template-sync-') as tmp:
             root = Path(tmp)
@@ -28,6 +63,23 @@ class TemplateSyncShaTest(unittest.TestCase):
             lock = json.loads((target / '.beply/template-lock.json').read_text())
             self.assertEqual(expected, lock['commit'])
             self.assertEqual(expected, lock['sha'])
+
+    def test_local_checkout_without_ref_records_its_commit(self):
+        with tempfile.TemporaryDirectory(prefix='t371-template-local-ref-') as tmp:
+            root = Path(tmp); source = root / 'source'; target = root / 'target'
+            (source / '.beply').mkdir(parents=True); (target / '.beply').mkdir(parents=True)
+            (source / '.beply/template-sync.json').write_text('{"overwrite": [], "createIfMissing": []}')
+            (target / '.beply/template-sync.json').write_text('{"defaultRef":"v1.5"}')
+            subprocess.run(['git', 'init', '-q', str(source)], check=True)
+            subprocess.run(['git', '-C', str(source), 'add', '.'], check=True)
+            subprocess.run(['git', '-C', str(source), '-c', 'user.name=Test', '-c',
+                            'user.email=test@example.invalid', 'commit', '-qm', 'fixture'], check=True)
+            expected = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
+            result = subprocess.run(['node', str(SYNC), '--template-root', str(source), '--apply'],
+                                    cwd=target, capture_output=True, text=True, env={'PATH': '/usr/bin:/bin'})
+            self.assertEqual(0, result.returncode, result.stderr)
+            lock = json.loads((target / '.beply/template-lock.json').read_text())
+            self.assertEqual((expected, expected, expected), (lock['ref'], lock['sha'], lock['commit']))
 
     def test_dirty_or_mismatched_source_fails_before_writing_lock(self):
         with tempfile.TemporaryDirectory(prefix='t371-template-dirty-') as tmp:
