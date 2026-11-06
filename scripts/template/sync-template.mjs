@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { dirname, resolve } from 'node:path'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 
 const root = process.cwd()
@@ -189,13 +189,11 @@ function gitTopLevel(cwd) {
 }
 
 function gitRefCommit(cwd, ref) {
-  try {
-    return execFileSync('git', ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`], {
-      cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim()
-  } catch {
-    return ''
-  }
+  const result = spawnSync('git', ['-c', 'core.warnAmbiguousRefs=true', 'rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`], {
+    cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  if (result.status !== 0 || result.stderr.trim() !== '') return ''
+  return result.stdout.trim()
 }
 
 function printPlan({ templateRoot, targetRef, overwrite, createIfMissing, neverOverwrite }) {

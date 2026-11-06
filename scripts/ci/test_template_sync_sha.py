@@ -81,6 +81,29 @@ class TemplateSyncShaTest(unittest.TestCase):
             lock = json.loads((target / '.beply/template-lock.json').read_text())
             self.assertEqual((expected, expected, expected), (lock['ref'], lock['sha'], lock['commit']))
 
+    def test_ambiguous_branch_and_tag_name_is_rejected_before_copy(self):
+        with tempfile.TemporaryDirectory(prefix='t371-template-ambiguous-ref-') as tmp:
+            root = Path(tmp); source = root / 'source'; target = root / 'target'
+            (source / '.beply').mkdir(parents=True); (target / '.beply').mkdir(parents=True)
+            (source / '.beply/template-sync.json').write_text('{"overwrite": [], "createIfMissing": []}')
+            lock = target / '.beply/template-lock.json'; lock.write_text('{"sha":"unchanged"}')
+            subprocess.run(['git', 'init', '-q', str(source)], check=True)
+            def git(*args):
+                return subprocess.check_output(['git', '-C', str(source), *args], text=True).strip()
+            git('add', '.')
+            git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'old')
+            old = git('rev-parse', 'HEAD')
+            (source / 'new.txt').write_text('new')
+            git('add', 'new.txt')
+            git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'new')
+            git('tag', 'v1.5')
+            git('branch', 'v1.5', old)
+            git('config', 'core.warnAmbiguousRefs', 'false')
+            result = subprocess.run(['node', str(SYNC), '--template-root', str(source), '--ref', 'v1.5', '--apply'],
+                                    cwd=target, capture_output=True, text=True)
+            self.assertNotEqual(0, result.returncode)
+            self.assertEqual('{"sha":"unchanged"}', lock.read_text())
+
     def test_dirty_or_mismatched_source_fails_before_writing_lock(self):
         with tempfile.TemporaryDirectory(prefix='t371-template-dirty-') as tmp:
             root = Path(tmp); source = root / 'source'; target = root / 'target'
