@@ -61,7 +61,7 @@ test('modelo de release rechaza matriz fija', () => fixture((dir) => {
   const path = join(dir, '.github/workflows/tests.yml')
   writeFileSync(path, readFileSync(path, 'utf8') + "\nfacturascripts-ref: ['v2026.3', 'v2026.2']\n")
   const result = run(dir, 'scripts/ci/validate-release-model.mjs')
-  assert.equal(result.status, 1); assert.match(result.stderr, /must take every FacturaScripts ref from the matrix file/)
+  assert.equal(result.status, 1); assert.match(result.stderr, /must not define facturascripts-ref anywhere else/)
 }, true))
 test('impacto en preparación solo exige URL para release', () => fixture((dir) => {
   const path = join(dir, 'docs/docs-sync/impact-map.json')
@@ -111,6 +111,12 @@ function releaseCase(name, edit, expected, message) {
   }, true))
 }
 const refLine = 'facturascripts-ref: ${{ fromJSON(needs.quality_contract.outputs.fs_refs) }}'
-releaseCase('C2-a rechaza lista en bloque', (text) => text.replace(refLine, 'facturascripts-ref:\n          - v2026.3'), 1, 'Tests workflow must take every FacturaScripts ref from the matrix file')
-releaseCase('C2-b rechaza ausencia de matriz', (text) => text.split('\n').filter((line) => !/^\s*facturascripts-ref:/.test(line)).join('\n'), 1, 'Tests workflow must define a facturascripts-ref matrix')
+releaseCase('C2-a rechaza lista en bloque', (text) => text.replace(refLine, 'facturascripts-ref:\n          - v2026.3'), 1, 'Tests workflow must define exactly four facturascripts-ref matrices taken from the matrix file')
+releaseCase('C2-b rechaza ausencia de matriz', (text) => text.split('\n').filter((line) => !/^\s*facturascripts-ref:/.test(line)).join('\n'), 1, 'Tests workflow must define exactly four facturascripts-ref matrices taken from the matrix file')
 releaseCase('C2-c acepta workflow intacto', (text) => text, 0)
+
+releaseCase('C2-d rechaza ref bajo include', (text) => text + '\ninclude:\n  - facturascripts-ref: v2025.1\n', 1)
+releaseCase('C2-e rechaza matriz inline', (text) => text + '\nmatrix: { facturascripts-ref: [v2026.3] }\n', 1)
+releaseCase('C2-f rechaza solo tres matrices', (text) => text.replace(refLine, 'php-version: [8.2]'), 1)
+releaseCase('O1-a rechaza clave entre comillas bajo include', (text) => text.replace(`        ${refLine}`, `        ${refLine}\n        include:\n          - "facturascripts-ref": v2025.1`), 1)
+releaseCase('O1-b rechaza clave en fromJSON bajo include', (text) => text.replace(`        ${refLine}`, `        ${refLine}\n        include: \${{ fromJSON('[{"facturascripts-ref":"v2025.1"}]') }}`), 1)

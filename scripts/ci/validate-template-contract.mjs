@@ -47,8 +47,6 @@ for (const path of [
   '.beply/template-sync.json',
   'Tools/manifest.json',
   'Tools/README.md',
-  'Lib/BeplyAgentToolProvider.php',
-  'Lib/TemplateToolsManifest.php',
   'docs/CODEX-WORKFLOW.md',
   'docs/TESTING.md',
   'docs/FACTURASCRIPTS-STYLE-GUIDE.md',
@@ -165,7 +163,25 @@ if (toolsManifest.plugin?.name !== ini.name) {
 if (toolsManifest.executionPolicy?.humanReviewRequired !== true) {
   fail('Tools execution policy must require human review by default')
 }
-for (const tool of toolsManifest.runtimeTools || []) {
+const toolListKeys = ['tools', 'toolPacks', 'runtimeTools']
+for (const key of toolListKeys) {
+  const value = toolsManifest[key]
+  if (value !== undefined && value !== null && !Array.isArray(value)) {
+    fail(`Tools/manifest.json ${key} must be an array`)
+  }
+}
+const declaresTools = toolListKeys.some((key) => {
+  const value = toolsManifest[key]
+  if (Array.isArray(value)) return value.length > 0
+  return value !== undefined && value !== null && typeof value === 'object' && Object.keys(value).length > 0
+})
+if (isTemplate || declaresTools) {
+  requireFile('Lib/BeplyAgentToolProvider.php')
+}
+if (isTemplate) {
+  requireFile('Lib/TemplateToolsManifest.php')
+}
+for (const tool of (Array.isArray(toolsManifest.runtimeTools) ? toolsManifest.runtimeTools : [])) {
   if (!tool.name || !tool.toolType || !tool.parameters) {
     fail(`Runtime tool is missing name/toolType/parameters: ${JSON.stringify(tool)}`)
   }

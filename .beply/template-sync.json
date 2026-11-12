@@ -21,6 +21,7 @@
     "scripts/ci/php84-compat-scan.php",
     "scripts/ci/read-facturascripts-matrix.mjs",
     "scripts/ci/test_facturascripts_matrix.mjs",
+    "scripts/ci/test_tools_contract.mjs",
     "scripts/ci/build_plugin_zip.py",
     "scripts/ci/build_plugin_artifact_attestation.mjs",
     "scripts/ci/build_source_provenance_manifest.mjs",

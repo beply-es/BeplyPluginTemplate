@@ -361,6 +361,9 @@ class ReleaseAdapterMigrationTests(unittest.TestCase):
             "validate-template-contract.mjs\n"
             "validate-docs-impact.mjs\n"
             "read-facturascripts-matrix.mjs\n"
+            "        facturascripts-ref: ${{ fromJSON(needs.quality_contract.outputs.fs_refs) }}\n"
+            "        facturascripts-ref: ${{ fromJSON(needs.quality_contract.outputs.fs_refs) }}\n"
+            "        facturascripts-ref: ${{ fromJSON(needs.quality_contract.outputs.fs_refs) }}\n"
             "        facturascripts-ref: ${{ fromJSON(needs.quality_contract.outputs.fs_refs) }}\n",
             encoding="utf-8",
         )
