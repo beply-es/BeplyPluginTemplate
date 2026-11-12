@@ -61,7 +61,7 @@ test('modelo de release rechaza matriz fija', () => fixture((dir) => {
   const path = join(dir, '.github/workflows/tests.yml')
   writeFileSync(path, readFileSync(path, 'utf8') + "\nfacturascripts-ref: ['v2026.3', 'v2026.2']\n")
   const result = run(dir, 'scripts/ci/validate-release-model.mjs')
-  assert.equal(result.status, 1); assert.match(result.stderr, /must not hard-code FacturaScripts refs/)
+  assert.equal(result.status, 1); assert.match(result.stderr, /must take every FacturaScripts ref from the matrix file/)
 }, true))
 test('impacto en preparación solo exige URL para release', () => fixture((dir) => {
   const path = join(dir, 'docs/docs-sync/impact-map.json')
@@ -72,3 +72,45 @@ test('impacto en preparación solo exige URL para release', () => fixture((dir) 
   result = run(dir, 'scripts/ci/validate-docs-impact.mjs', ['--require-ai'])
   assert.equal(result.status, 1); assert.match(result.stderr, /has no published page URL/)
 }, true))
+
+function demo(dir) {
+  const ini = join(dir, 'facturascripts.ini')
+  writeFileSync(ini, readFileSync(ini, 'utf8').replace('name = BeplyPluginTemplate', 'name = BeplyDemo'))
+  const manifest = join(dir, 'Tools/manifest.json')
+  const data = JSON.parse(readFileSync(manifest, 'utf8'))
+  data.plugin.name = 'BeplyDemo'
+  writeFileSync(manifest, JSON.stringify(data))
+}
+function contractCase(name, matrix, message, asDemo = true, missingReader = false) {
+  test(name, () => fixture((dir) => {
+    if (asDemo) demo(dir)
+    json(dir, '.beply/facturascripts-matrix.json', matrix)
+    if (missingReader) rmSync(join(dir, 'scripts/ci/read-facturascripts-matrix.mjs'))
+    const result = run(dir, 'scripts/ci/validate-template-contract.mjs')
+    assert.notEqual(result.status, 0)
+    assert.ok(result.stderr.includes(message), result.stderr)
+  }, true))
+}
+const required = (ref) => ({ ref, required: true })
+contractCase('C1-a plantilla exige v2026.2', { defaultRef: 'v2026.3', supported: [required('v2026.3'), { ref: 'v2026.2', required: false }] }, 'FacturaScripts matrix must require v2026.2', false)
+contractCase('C1-b plantilla exige default v2026.3', { ...template, defaultRef: 'v2026.2' }, 'FacturaScripts defaultRef must be v2026.3 until the matrix is intentionally updated', false)
+contractCase('C1-c patrón de ref', { defaultRef: 'main', supported: [required('main')] }, 'FacturaScripts required refs must use vYYYY.N format')
+contractCase('C1-d duplicados', { defaultRef: 'v2025.71', supported: [required('v2025.71'), required('v2025.71')] }, 'FacturaScripts required refs must be unique')
+contractCase('C1-e default opcional', { defaultRef: 'v2026.65', supported: [required('v2025.71'), { ref: 'v2026.65', required: false }] }, 'FacturaScripts defaultRef must be required')
+contractCase('C1-f sin requeridos', { defaultRef: 'v2026.65', supported: [{ ref: 'v2026.65', required: false }] }, 'FacturaScripts matrix must require at least one ref')
+contractCase('C1-g lector obligatorio', other, 'Missing required file: scripts/ci/read-facturascripts-matrix.mjs', true, true)
+
+function releaseCase(name, edit, expected, message) {
+  test(name, () => fixture((dir) => {
+    const path = join(dir, '.github/workflows/tests.yml')
+    const original = readFileSync(path, 'utf8')
+    writeFileSync(path, edit(original))
+    const result = run(dir, 'scripts/ci/validate-release-model.mjs')
+    assert.equal(result.status, expected, result.stderr)
+    if (message) assert.ok(result.stderr.includes(message), result.stderr)
+  }, true))
+}
+const refLine = 'facturascripts-ref: ${{ fromJSON(needs.quality_contract.outputs.fs_refs) }}'
+releaseCase('C2-a rechaza lista en bloque', (text) => text.replace(refLine, 'facturascripts-ref:\n          - v2026.3'), 1, 'Tests workflow must take every FacturaScripts ref from the matrix file')
+releaseCase('C2-b rechaza ausencia de matriz', (text) => text.split('\n').filter((line) => !/^\s*facturascripts-ref:/.test(line)).join('\n'), 1, 'Tests workflow must define a facturascripts-ref matrix')
+releaseCase('C2-c acepta workflow intacto', (text) => text, 0)

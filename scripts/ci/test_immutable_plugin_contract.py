@@ -360,7 +360,8 @@ class ReleaseAdapterMigrationTests(unittest.TestCase):
         (workflow_dir / "tests.yml").write_text(
             "validate-template-contract.mjs\n"
             "validate-docs-impact.mjs\n"
-            "read-facturascripts-matrix.mjs\nfromJSON(needs.quality_contract.outputs.fs_refs)\n",
+            "read-facturascripts-matrix.mjs\n"
+            "        facturascripts-ref: ${{ fromJSON(needs.quality_contract.outputs.fs_refs) }}\n",
             encoding="utf-8",
         )
         return subprocess.run(
