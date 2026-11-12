@@ -54,3 +54,37 @@ test('plantilla exige su manifiesto PHP', () => fixture((dir) => {
   assert.notEqual(result.status, 0)
   assert.match(result.stdout + result.stderr, /Lib\/TemplateToolsManifest\.php/)
 }))
+
+for (const key of ['tools', 'toolPacks', 'runtimeTools']) {
+  test(`C1: ${key} como objeto no vacío exige proveedor y array`, () => fixture((dir) => {
+    demo(dir)
+    const path = join(dir, 'Tools/manifest.json')
+    const data = JSON.parse(readFileSync(path, 'utf8'))
+    data[key] = { demo: { id: 'demo', name: 'demo_tool' } }
+    writeFileSync(path, JSON.stringify(data))
+    const result = run(dir)
+    const output = result.stdout + result.stderr
+    assert.notEqual(result.status, 0)
+    assert.ok(output.includes('Lib/BeplyAgentToolProvider.php'), output)
+    assert.ok(output.includes(`${key} must be an array`), output)
+    assert.doesNotMatch(output, /TypeError/)
+  }))
+}
+test('C1: objeto vacío es inválido pero no declara tools', () => fixture((dir) => {
+  demo(dir)
+  const path = join(dir, 'Tools/manifest.json')
+  const data = JSON.parse(readFileSync(path, 'utf8'))
+  data.tools = null; data.toolPacks = {}
+  writeFileSync(path, JSON.stringify(data))
+  const result = run(dir)
+  const output = result.stdout + result.stderr
+  assert.notEqual(result.status, 0)
+  assert.doesNotMatch(output, /Lib\/BeplyAgentToolProvider\.php/)
+  assert.match(output, /toolPacks must be an array/)
+}))
+test('C2: plantilla exige proveedor incluso sin tools', () => fixture((dir) => {
+  rmSync(join(dir, 'Lib/BeplyAgentToolProvider.php'))
+  const result = run(dir)
+  assert.notEqual(result.status, 0)
+  assert.match(result.stdout + result.stderr, /Lib\/BeplyAgentToolProvider\.php/)
+}))
