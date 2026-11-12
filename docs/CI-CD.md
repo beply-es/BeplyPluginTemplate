@@ -191,6 +191,8 @@ jobs:
 ```
 
 La promocion usa el workflow reutilizable equivalente con el mismo SHA. El
+plugin fija ambos workflows a ese mismo SHA de 40 caracteres y lo pasa como
+`contract_sha`; la plantilla se llama a si misma en local. El
 template es publico y no requiere un secreto de checkout; los tokens de
 catalogo y de lectura de evidencia privada siguen siendo obligatorios y
 fail-closed. No se copia packaging, transporte, parsing de evidencia ni logica

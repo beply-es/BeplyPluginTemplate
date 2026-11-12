@@ -593,11 +593,42 @@ class SourceProvenanceCarrierTests(unittest.TestCase):
         self.assertIn("workflow_dispatch", validate["run"])
         self.assertIn('test "${GITHUB_REF_TYPE}" = "tag"', validate["run"])
 
+    TEMPLATE_WORKFLOW_PIN = re.compile(
+        r"beply-es/BeplyPluginTemplate/\.github/workflows/"
+        r"(reusable-immutable-plugin-candidate|reusable-promote-immutable-plugin-candidate)"
+        r"\.yml@([0-9a-f]{40})"
+    )
+
+    def _template_call(self, workflow: str, job_key: str) -> dict:
+        doc = yaml.safe_load((self.ROOT / ".github/workflows" / workflow).read_text(encoding="utf-8"))
+        return doc["jobs"][job_key]
+
     def test_template_release_never_claims_tag_publisher_provenance_for_a_local_call(self) -> None:
-        release = yaml.safe_load((self.ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
-        job = release["jobs"]["publish_immutable_candidate"]
-        self.assertTrue(job["uses"].startswith("./"))
-        self.assertIs(job["with"]["submit_source_provenance"], False)
+        job = self._template_call("release.yml", "publish_immutable_candidate")
+        if job["uses"].startswith("./"):
+            self.assertIs(job["with"]["submit_source_provenance"], False)
+
+    def test_release_and_promotion_call_one_template_contract(self) -> None:
+        release = self._template_call("release.yml", "publish_immutable_candidate")
+        promote = self._template_call("promote-prod.yml", "promote")
+        ini = (self.ROOT / "facturascripts.ini").read_text(encoding="utf-8")
+        is_template = re.search(r"^name\s*=\s*[\"']?BeplyPluginTemplate[\"']?\s*$", ini, re.MULTILINE) is not None
+        if is_template:
+            # The template calls its own workflows; a plugin never may.
+            self.assertEqual(release["uses"], "./.github/workflows/reusable-immutable-plugin-candidate.yml")
+            self.assertEqual(promote["uses"], "./.github/workflows/reusable-promote-immutable-plugin-candidate.yml")
+            self.assertEqual(release["with"]["contract_sha"], "${{ github.sha }}")
+            self.assertEqual(promote["with"]["contract_sha"], "${{ github.sha }}")
+            return
+        release_pin = self.TEMPLATE_WORKFLOW_PIN.fullmatch(release["uses"])
+        promote_pin = self.TEMPLATE_WORKFLOW_PIN.fullmatch(promote["uses"])
+        self.assertIsNotNone(release_pin, release["uses"])
+        self.assertIsNotNone(promote_pin, promote["uses"])
+        self.assertEqual(release_pin.group(1), "reusable-immutable-plugin-candidate")
+        self.assertEqual(promote_pin.group(1), "reusable-promote-immutable-plugin-candidate")
+        self.assertEqual(promote_pin.group(2), release_pin.group(2), "release and promotion must pin one template revision")
+        self.assertEqual(release["with"]["contract_sha"], release_pin.group(2))
+        self.assertEqual(promote["with"]["contract_sha"], promote_pin.group(2))
 
 
 class DevCandidateCatalogReadbackTests(unittest.TestCase):
