@@ -629,6 +629,18 @@ class SourceProvenanceCarrierTests(unittest.TestCase):
         self.assertEqual(promote_pin.group(2), release_pin.group(2), "release and promotion must pin one template revision")
         self.assertEqual(release["with"]["contract_sha"], release_pin.group(2))
         self.assertEqual(promote["with"]["contract_sha"], promote_pin.group(2))
+        for workflow in ("release.yml", "promote-prod.yml"):
+            doc = yaml.safe_load((self.ROOT / ".github/workflows" / workflow).read_text(encoding="utf-8"))
+            for key, job in doc["jobs"].items():
+                uses = job.get("uses")
+                if not isinstance(uses, str):
+                    continue
+                if "BeplyPluginTemplate" not in uses and "immutable-plugin-candidate" not in uses:
+                    continue
+                pin = self.TEMPLATE_WORKFLOW_PIN.fullmatch(uses)
+                self.assertIsNotNone(pin, f"{workflow}:{key} calls the template without an exact SHA pin: {uses}")
+                self.assertEqual(pin.group(2), release_pin.group(2), f"{workflow}:{key} pins another template revision")
+                self.assertEqual((job.get("with") or {}).get("contract_sha"), pin.group(2), f"{workflow}:{key}")
 
 
 class DevCandidateCatalogReadbackTests(unittest.TestCase):
