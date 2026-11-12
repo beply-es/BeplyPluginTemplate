@@ -14,6 +14,9 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 EXCLUDED_ROOTS = {
     ".git",
     ".github",
+    ".claude",
+    ".agents",
+    ".codex",
     "Doc",
     "docs",
     "scripts",
@@ -27,6 +30,7 @@ EXCLUDED_ROOTS = {
 EXCLUDED_NAMES = {
     "README.md",
     "CLAUDE.md",
+    "AGENTS.md",
     ".gitignore",
     "package.json",
     "package-lock.json",

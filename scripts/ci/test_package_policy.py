@@ -35,6 +35,22 @@ class PackagePolicyTests(unittest.TestCase):
             root = self._plugin(tmp)
             self.assertEqual(self._names(root, tmp), ["BeplyDemo/Init.php", "BeplyDemo/facturascripts.ini"])
 
+    def test_agent_instruction_files_never_ship(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._plugin(tmp)
+            (root / "AGENTS.md").write_text("agent guide", encoding="utf-8")
+            (root / "CLAUDE.md").write_text("agent guide", encoding="utf-8")
+            (root / "Controller").mkdir()
+            (root / "Controller" / "AGENTS.md").write_text("nested agent guide", encoding="utf-8")
+            (root / "Controller" / "Demo.php").write_text("<?php\n", encoding="utf-8")
+            for hidden in (".claude", ".agents", ".codex"):
+                (root / hidden).mkdir()
+                (root / hidden / "settings.json").write_text("{}", encoding="utf-8")
+            self.assertEqual(
+                self._names(root, tmp),
+                ["BeplyDemo/Controller/Demo.php", "BeplyDemo/Init.php", "BeplyDemo/facturascripts.ini"],
+            )
+
     def test_policy_keeps_only_the_declared_scripts_subdirectory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._plugin(tmp)
