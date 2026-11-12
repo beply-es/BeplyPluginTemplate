@@ -68,6 +68,7 @@ jobs:
         run: |
           node --test scripts/ci/test_source_provenance_manifest.mjs
           node --test scripts/ci/test_facturascripts_matrix.mjs
+          node --test scripts/ci/test_tools_contract.mjs
 
       - name: Validate documentation impact
         run: node scripts/ci/validate-docs-impact.mjs

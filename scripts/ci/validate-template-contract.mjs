@@ -47,8 +47,6 @@ for (const path of [
   '.beply/template-sync.json',
   'Tools/manifest.json',
   'Tools/README.md',
-  'Lib/BeplyAgentToolProvider.php',
-  'Lib/TemplateToolsManifest.php',
   'docs/CODEX-WORKFLOW.md',
   'docs/TESTING.md',
   'docs/FACTURASCRIPTS-STYLE-GUIDE.md',
@@ -164,6 +162,16 @@ if (toolsManifest.plugin?.name !== ini.name) {
 }
 if (toolsManifest.executionPolicy?.humanReviewRequired !== true) {
   fail('Tools execution policy must require human review by default')
+}
+const declaresTools =
+  (toolsManifest.tools || []).length > 0 ||
+  (toolsManifest.toolPacks || []).length > 0 ||
+  (toolsManifest.runtimeTools || []).length > 0
+if (isTemplate || declaresTools) {
+  requireFile('Lib/BeplyAgentToolProvider.php')
+}
+if (isTemplate) {
+  requireFile('Lib/TemplateToolsManifest.php')
 }
 for (const tool of toolsManifest.runtimeTools || []) {
   if (!tool.name || !tool.toolType || !tool.parameters) {

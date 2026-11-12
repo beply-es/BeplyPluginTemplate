@@ -5,7 +5,7 @@ Los plugins pueden ampliar las capacidades del chat/agente de FacturaScripts dec
 ## Estructura
 
 - `Tools/manifest.json`: contrato machine-readable.
-- `Lib/BeplyAgentToolProvider.php`: punto de descubrimiento actual de `BeplyAgents`.
+- `Lib/BeplyAgentToolProvider.php`: punto de descubrimiento actual de `BeplyAgents`. El proveedor es obligatorio desde que `Tools/manifest.json` declara la primera tool, pack o runtime tool; un plugin sin tools solo necesita el manifiesto.
 - `Lib/*ToolExecutor.php`: ejecuta o prepara la accion.
 - Tests unitarios/runtime: validan schema, policies, permisos y que no haya mutaciones autonomas no permitidas.
 
