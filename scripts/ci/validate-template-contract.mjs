@@ -42,6 +42,7 @@ for (const path of [
   'README.md',
   'facturascripts.ini',
   '.beply/facturascripts-matrix.json',
+  'scripts/ci/read-facturascripts-matrix.mjs',
   '.beply/template-lock.json',
   '.beply/template-sync.json',
   'Tools/manifest.json',
@@ -98,7 +99,12 @@ if (!minPhp) {
 
 const matrix = readJson('.beply/facturascripts-matrix.json')
 const supported = Array.isArray(matrix.supported) ? matrix.supported : []
-if (matrix.defaultRef !== 'v2026.3') {
+const requiredRefs = supported.filter((item) => item?.required === true).map((item) => item.ref)
+if (requiredRefs.length === 0) fail('FacturaScripts matrix must require at least one ref')
+if (requiredRefs.some((ref) => typeof ref !== 'string' || !/^v\d{4}\.\d{1,3}$/.test(ref))) fail('FacturaScripts required refs must use vYYYY.N format')
+if (new Set(requiredRefs).size !== requiredRefs.length) fail('FacturaScripts required refs must be unique')
+if (!requiredRefs.includes(matrix.defaultRef)) fail('FacturaScripts defaultRef must be required')
+if (isTemplate && matrix.defaultRef !== 'v2026.3') {
   fail('FacturaScripts defaultRef must be v2026.3 until the matrix is intentionally updated')
 }
 
@@ -141,9 +147,11 @@ for (const adapter of ['.github/workflows/release.yml', '.github/workflows/promo
     fail(`template-sync must create missing release adapter ${adapter}`)
   }
 }
-for (const ref of ['v2026.3', 'v2026.2']) {
-  if (!supported.some((item) => item.ref === ref && item.required === true)) {
-    fail(`FacturaScripts matrix must require ${ref}`)
+if (isTemplate) {
+  for (const ref of ['v2026.3', 'v2026.2']) {
+    if (!requiredRefs.includes(ref)) {
+      fail(`FacturaScripts matrix must require ${ref}`)
+    }
   }
 }
 
