@@ -38,7 +38,7 @@ Si hay 50 botones, hay 50 entradas y 50 pruebas. Las pruebas deben crear datos, 
 
 ## Multiversion FacturaScripts
 
-La matriz canonica vive en `.beply/facturascripts-matrix.json`. CI ejecuta contra cada `supported[].ref` marcado como `required`.
+La matriz canonica vive en `.beply/facturascripts-matrix.json`. `tests.yml` y los validadores la leen; cada plugin cambia sus cores editando solo ese fichero. CI ejecuta contra cada `supported[].ref` marcado como `required`.
 
 Cuando salga una version nueva:
 

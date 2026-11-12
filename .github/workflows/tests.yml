@@ -14,7 +14,6 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   TZ: Europe/Madrid
   FS_E2E_TIMEZONE: Europe/Madrid
-  FACTURASCRIPTS_REF: v2026.3
   PLUGIN_FOLDER: ${{ github.event.repository.name }}
 
 concurrency:
@@ -29,6 +28,9 @@ jobs:
     name: Quality Contract
     timeout-minutes: 10
     runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
+
+    outputs:
+      fs_refs: ${{ steps.fs-matrix.outputs.fs_refs }}
 
     steps:
       - name: Checkout Plugin
@@ -47,6 +49,10 @@ jobs:
       - name: Validate release workflow model
         run: node scripts/ci/validate-release-model.mjs
 
+      - name: Read FacturaScripts matrix
+        id: fs-matrix
+        run: node scripts/ci/read-facturascripts-matrix.mjs >> "$GITHUB_OUTPUT"
+
       # ARC's system Python has no PyYAML (GitHub-hosted images did); pinned, in a venv.
       - name: Unit test immutable plugin artifact contract
         run: |
@@ -59,7 +65,9 @@ jobs:
         run: python3 .github/ci/test_tests_workflow_triggers.py
 
       - name: Unit test source provenance manifest contract
-        run: node --test scripts/ci/test_source_provenance_manifest.mjs
+        run: |
+          node --test scripts/ci/test_source_provenance_manifest.mjs
+          node --test scripts/ci/test_facturascripts_matrix.mjs
 
       - name: Validate documentation impact
         run: node scripts/ci/validate-docs-impact.mjs
@@ -96,7 +104,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        facturascripts-ref: ['v2026.3', 'v2026.2']
+        facturascripts-ref: ${{ fromJSON(needs.quality_contract.outputs.fs_refs) }}
 
     steps:
       - name: Checkout FacturaScripts
@@ -138,14 +146,15 @@ jobs:
 
   unit:
     name: Unit FS ${{ matrix.facturascripts-ref }} PHP ${{ matrix.php-version }}
-    needs: lint
+    needs: [quality_contract, lint]
+    if: github.event.pull_request.draft != true
     timeout-minutes: 20
     runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     strategy:
       fail-fast: false
       matrix:
         php-version: ['8.2']
-        facturascripts-ref: ['v2026.3', 'v2026.2']
+        facturascripts-ref: ${{ fromJSON(needs.quality_contract.outputs.fs_refs) }}
 
     steps:
       - name: Checkout FacturaScripts
@@ -246,14 +255,15 @@ jobs:
 
   runtime:
     name: Runtime FS ${{ matrix.facturascripts-ref }} PHP ${{ matrix.php-version }}
-    needs: lint
+    needs: [quality_contract, lint]
+    if: github.event.pull_request.draft != true
     timeout-minutes: 20
     runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     strategy:
       fail-fast: false
       matrix:
         php-version: ['8.2']
-        facturascripts-ref: ['v2026.3', 'v2026.2']
+        facturascripts-ref: ${{ fromJSON(needs.quality_contract.outputs.fs_refs) }}
 
     steps:
       - name: Checkout FacturaScripts
@@ -361,13 +371,14 @@ jobs:
 
   e2e:
     name: E2E FS ${{ matrix.facturascripts-ref }}
-    needs: lint
+    needs: [quality_contract, lint]
+    if: github.event.pull_request.draft != true
     timeout-minutes: 25
     runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     strategy:
       fail-fast: false
       matrix:
-        facturascripts-ref: ['v2026.3', 'v2026.2']
+        facturascripts-ref: ${{ fromJSON(needs.quality_contract.outputs.fs_refs) }}
     env:
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
 
