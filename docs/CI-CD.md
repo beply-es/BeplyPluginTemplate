@@ -83,6 +83,10 @@ siempre: los huecos de checkout se saltan y el runtime recibe solo el plugin.
   GitHub lo enmascara en los logs y el checkout no lo deja guardado (`persist-credentials: false`).
 - Como mucho 4 dependencias.
 
+Antes de clonar, cada job pesado comprueba que exista cada secreto nombrado. Ese paso solo recibe
+el nombre y un `true`/`false` (`secrets[…] != ''`), nunca el valor. Si falta alguno, el job queda en
+rojo con «Falta el secreto X»: nunca hace un checkout anónimo ni se salta la dependencia.
+
 `scripts/ci/read-ci-dependencies.mjs` valida la lista en Quality Contract. Si es inválida, Quality
 Contract falla y ningún job pesado arranca. Unit, Runtime y E2E clonan cada dependencia junto al
 plugin. Runtime y E2E pasan `CI_PLUGIN_FOLDERS=<plugin>,<deps>` y `CI_PLUGIN_DEPENDENCIES=<deps>` a

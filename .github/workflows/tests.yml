@@ -199,6 +199,31 @@ jobs:
           path: facturascripts/Plugins/${{ env.PLUGIN_FOLDER }}
           fetch-depth: 0
 
+      # Solo el NOMBRE y si existe (true/false): el valor no llega a este paso. Un secreto que
+      # falta es rojo con su nombre, nunca un checkout anónimo.
+      - name: Check CI dependency keys
+        if: needs.quality_contract.outputs.has_dependencies == 'true'
+        env:
+          DEP1_SECRET: ${{ needs.quality_contract.outputs.dep1_ssh_key_secret }}
+          DEP1_KEY_SET: ${{ secrets[needs.quality_contract.outputs.dep1_ssh_key_secret] != '' }}
+          DEP2_SECRET: ${{ needs.quality_contract.outputs.dep2_ssh_key_secret }}
+          DEP2_KEY_SET: ${{ secrets[needs.quality_contract.outputs.dep2_ssh_key_secret] != '' }}
+          DEP3_SECRET: ${{ needs.quality_contract.outputs.dep3_ssh_key_secret }}
+          DEP3_KEY_SET: ${{ secrets[needs.quality_contract.outputs.dep3_ssh_key_secret] != '' }}
+          DEP4_SECRET: ${{ needs.quality_contract.outputs.dep4_ssh_key_secret }}
+          DEP4_KEY_SET: ${{ secrets[needs.quality_contract.outputs.dep4_ssh_key_secret] != '' }}
+        run: |
+          missing=0
+          for n in 1 2 3 4; do
+            name_var="DEP${n}_SECRET"
+            set_var="DEP${n}_KEY_SET"
+            if [ -n "${!name_var}" ] && [ "${!set_var}" != "true" ]; then
+              echo "::error::Falta el secreto ${!name_var} (deploy key de solo lectura declarada en .beply/ci-dependencies.json)."
+              missing=1
+            fi
+          done
+          exit "${missing}"
+
       # Plugin de beply-es declarado en .beply/ci-dependencies.json; sin lista, se salta.
       - name: Checkout CI dependency 1
         if: needs.quality_contract.outputs.dep1_repository != ''
@@ -351,6 +376,31 @@ jobs:
         with:
           path: facturascripts/Plugins/${{ env.PLUGIN_FOLDER }}
           fetch-depth: 0
+
+      # Solo el NOMBRE y si existe (true/false): el valor no llega a este paso. Un secreto que
+      # falta es rojo con su nombre, nunca un checkout anónimo.
+      - name: Check CI dependency keys
+        if: needs.quality_contract.outputs.has_dependencies == 'true'
+        env:
+          DEP1_SECRET: ${{ needs.quality_contract.outputs.dep1_ssh_key_secret }}
+          DEP1_KEY_SET: ${{ secrets[needs.quality_contract.outputs.dep1_ssh_key_secret] != '' }}
+          DEP2_SECRET: ${{ needs.quality_contract.outputs.dep2_ssh_key_secret }}
+          DEP2_KEY_SET: ${{ secrets[needs.quality_contract.outputs.dep2_ssh_key_secret] != '' }}
+          DEP3_SECRET: ${{ needs.quality_contract.outputs.dep3_ssh_key_secret }}
+          DEP3_KEY_SET: ${{ secrets[needs.quality_contract.outputs.dep3_ssh_key_secret] != '' }}
+          DEP4_SECRET: ${{ needs.quality_contract.outputs.dep4_ssh_key_secret }}
+          DEP4_KEY_SET: ${{ secrets[needs.quality_contract.outputs.dep4_ssh_key_secret] != '' }}
+        run: |
+          missing=0
+          for n in 1 2 3 4; do
+            name_var="DEP${n}_SECRET"
+            set_var="DEP${n}_KEY_SET"
+            if [ -n "${!name_var}" ] && [ "${!set_var}" != "true" ]; then
+              echo "::error::Falta el secreto ${!name_var} (deploy key de solo lectura declarada en .beply/ci-dependencies.json)."
+              missing=1
+            fi
+          done
+          exit "${missing}"
 
       # Plugin de beply-es declarado en .beply/ci-dependencies.json; sin lista, se salta.
       - name: Checkout CI dependency 1
@@ -513,6 +563,31 @@ jobs:
         with:
           path: facturascripts/Plugins/${{ env.PLUGIN_FOLDER }}
           fetch-depth: 0
+
+      # Solo el NOMBRE y si existe (true/false): el valor no llega a este paso. Un secreto que
+      # falta es rojo con su nombre, nunca un checkout anónimo.
+      - name: Check CI dependency keys
+        if: needs.quality_contract.outputs.has_dependencies == 'true'
+        env:
+          DEP1_SECRET: ${{ needs.quality_contract.outputs.dep1_ssh_key_secret }}
+          DEP1_KEY_SET: ${{ secrets[needs.quality_contract.outputs.dep1_ssh_key_secret] != '' }}
+          DEP2_SECRET: ${{ needs.quality_contract.outputs.dep2_ssh_key_secret }}
+          DEP2_KEY_SET: ${{ secrets[needs.quality_contract.outputs.dep2_ssh_key_secret] != '' }}
+          DEP3_SECRET: ${{ needs.quality_contract.outputs.dep3_ssh_key_secret }}
+          DEP3_KEY_SET: ${{ secrets[needs.quality_contract.outputs.dep3_ssh_key_secret] != '' }}
+          DEP4_SECRET: ${{ needs.quality_contract.outputs.dep4_ssh_key_secret }}
+          DEP4_KEY_SET: ${{ secrets[needs.quality_contract.outputs.dep4_ssh_key_secret] != '' }}
+        run: |
+          missing=0
+          for n in 1 2 3 4; do
+            name_var="DEP${n}_SECRET"
+            set_var="DEP${n}_KEY_SET"
+            if [ -n "${!name_var}" ] && [ "${!set_var}" != "true" ]; then
+              echo "::error::Falta el secreto ${!name_var} (deploy key de solo lectura declarada en .beply/ci-dependencies.json)."
+              missing=1
+            fi
+          done
+          exit "${missing}"
 
       # Plugin de beply-es declarado en .beply/ci-dependencies.json; sin lista, se salta.
       - name: Checkout CI dependency 1

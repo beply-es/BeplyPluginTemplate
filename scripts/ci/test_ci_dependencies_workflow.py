@@ -69,7 +69,7 @@ class CiDependenciesWorkflowTests(unittest.TestCase):
             for n in SLOTS:
                 with self.subTest(job=job_name, slot=n):
                     index = step_index(steps, f"Checkout CI dependency {n}")
-                    self.assertEqual(plugin + n, index, "los huecos van seguidos tras el plugin")
+                    self.assertEqual(plugin + 1 + n, index, "los huecos van seguidos tras la comprobación de claves")
                     step = steps[index]
                     self.assertEqual(f"{OUT}dep{n}_repository != ''", step.get("if"))
                     self.assertTrue(step["uses"].startswith(CHECKOUT), step["uses"])
@@ -82,12 +82,54 @@ class CiDependenciesWorkflowTests(unittest.TestCase):
                     }, step["with"])
                     self.assertNotIn("env", step)
 
+    def test_a_missing_named_secret_fails_with_its_name_before_any_checkout(self):
+        for job_name in DEP_JOBS:
+            with self.subTest(job=job_name):
+                steps = self.jobs[job_name]["steps"]
+                index = step_index(steps, "Check CI dependency keys")
+                self.assertEqual(step_index(steps, "Checkout Plugin") + 1, index)
+                step = steps[index]
+                self.assertEqual(f"{OUT}has_dependencies == 'true'", step.get("if"))
+                expected = {}
+                for n in SLOTS:
+                    expected[f"DEP{n}_SECRET"] = "${{ %sdep%d_ssh_key_secret }}" % (OUT, n)
+                    expected[f"DEP{n}_KEY_SET"] = "${{ secrets[%sdep%d_ssh_key_secret] != '' }}" % (OUT, n)
+                self.assertEqual(expected, step["env"])
+                run = step["run"]
+                self.assertIn('"${!set_var}" != "true"', run)
+                self.assertIn("::error::Falta el secreto ${!name_var}", run)
+                self.assertIn('exit "${missing}"', run)
+                self.assertNotIn("set -x", run)
+
     def test_no_other_step_reads_a_secret_by_dynamic_name(self):
-        allowed = {"${{ secrets[%sdep%d_ssh_key_secret] }}" % (OUT, n) for n in SLOTS}
         text = WORKFLOW.read_text(encoding="utf-8")
-        found = re.findall(r"\$\{\{\s*secrets\[[^\]]*\]\s*\}\}", text)
-        self.assertEqual(len(DEP_JOBS) * len(SLOTS), len(found))
-        self.assertEqual(allowed, set(found))
+        checkout = {"${{ secrets[%sdep%d_ssh_key_secret] }}" % (OUT, n) for n in SLOTS}
+        presence = {"${{ secrets[%sdep%d_ssh_key_secret] != '' }}" % (OUT, n) for n in SLOTS}
+        found = re.findall(r"\$\{\{[^}]*secrets\[[^}]*\}\}", text)
+        self.assertEqual(2 * len(DEP_JOBS) * len(SLOTS), len(found))
+        self.assertEqual(checkout | presence, set(found))
+        self.assertEqual(len(found), text.count("secrets["), "ningún secrets[ fuera de esas expresiones")
+
+    def test_lists_never_expose_more_than_names(self):
+        reader = (ROOT / "scripts/ci/read-ci-dependencies.mjs").read_text(encoding="utf-8")
+        self.assertNotIn("process.env)", reader)
+        self.assertNotIn("set -x", WORKFLOW.read_text(encoding="utf-8"))
+
+    def test_sync_policy_never_overwrites_the_plugin_list(self):
+        import json
+        policy = json.loads((ROOT / ".beply/template-sync.json").read_text(encoding="utf-8"))
+        self.assertIn(".beply/ci-dependencies.json", policy["neverOverwrite"])
+        self.assertNotIn(".beply/ci-dependencies.json", policy["overwrite"] + policy["createIfMissing"])
+        for script in ("scripts/ci/read-ci-dependencies.mjs", "scripts/ci/test_ci_dependencies.mjs",
+                       "scripts/ci/test_ci_dependencies_workflow.py"):
+            self.assertIn(script, policy["overwrite"])
+        self.assertFalse((ROOT / ".beply/ci-dependencies.json").exists(), "la plantilla no trae lista propia")
+
+    def test_heavy_jobs_already_needed_quality_contract(self):
+        # Unit, Runtime y E2E ya dependían de Quality Contract (por fs_refs): leer aquí la lista
+        # no añade ningún needs ni serializa nada nuevo.
+        for job_name in DEP_JOBS:
+            self.assertEqual(["quality_contract", "lint"], self.jobs[job_name]["needs"], job_name)
 
     def test_light_jobs_do_not_clone_dependencies(self):
         for job_name in NO_DEP_JOBS:
@@ -104,10 +146,6 @@ class CiDependenciesWorkflowTests(unittest.TestCase):
             }, step["env"], job_name)
             last_checkout = step_index(steps, f"Checkout CI dependency {SLOTS[-1]}")
             self.assertLess(last_checkout, steps.index(step))
-
-    def test_jobs_that_read_outputs_need_quality_contract(self):
-        for job_name in DEP_JOBS:
-            self.assertIn("quality_contract", self.jobs[job_name]["needs"], job_name)
 
 
 def call_sequence(block):
