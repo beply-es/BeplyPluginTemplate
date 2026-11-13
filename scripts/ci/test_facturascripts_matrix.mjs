@@ -2,16 +2,62 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
 const root = resolve(import.meta.dirname, '../..')
-const template = JSON.parse(readFileSync(join(root, '.beply/facturascripts-matrix.json'), 'utf8'))
+const template = { defaultRef: 'v2026.3', supported: [{ ref: 'v2026.3', required: true }, { ref: 'v2026.2', required: true }] }
 const other = { defaultRef: 'v2026.65', supported: [{ ref: 'v2025.71', required: true }, { ref: 'v2026.65', required: true }] }
+function populate(dir) {
+  const files = [
+    'AGENTS.md', 'README.md', 'Tools/README.md', 'docs/CODEX-WORKFLOW.md', 'docs/TESTING.md',
+    'docs/FACTURASCRIPTS-STYLE-GUIDE.md', 'docs/DOCUMENTATION-GOVERNANCE.md',
+    'docs/AI-TOOLS-MANIFEST.md', 'docs/ROM-COPY-CLEANROOM.md', 'docs/TEMPLATE-SYNC.md',
+    'docs/CI-CD.md', 'docs/user/modulo.md', 'tests/e2e/smoke.spec.ts',
+    'phpunit.unit.xml.dist', 'phpunit.runtime.xml.dist', 'scripts/ci/build_plugin_zip.py',
+    'scripts/ci/build_plugin_artifact_attestation.mjs', 'scripts/ci/immutable_plugin_contract.py',
+    'scripts/ci/test_immutable_plugin_contract.py', 'scripts/template/sync-template.mjs',
+    'Lib/BeplyAgentToolProvider.php', 'Lib/TemplateToolsManifest.php',
+  ]
+  function put(path, text = '') {
+    const target = join(dir, path)
+    mkdirSync(dirname(target), { recursive: true })
+    writeFileSync(target, text)
+  }
+  for (const file of files) put(file)
+  for (const script of ['read-facturascripts-matrix.mjs', 'validate-template-contract.mjs', 'validate-release-model.mjs', 'validate-docs-impact.mjs']) {
+    const target = `scripts/ci/${script}`
+    mkdirSync(dirname(join(dir, target)), { recursive: true })
+    cpSync(join(root, target), join(dir, target))
+  }
+  const data = (path, value) => put(path, JSON.stringify(value))
+  put('facturascripts.ini', 'name = BeplyPluginTemplate\nversion = 1.5\nmin_php = 8.2\n')
+  data('.beply/facturascripts-matrix.json', { defaultRef: 'v2026.3', supported: [{ ref: 'v2026.3', required: true }, { ref: 'v2026.2', required: true }] })
+  data('.beply/template-lock.json', { template: 'beply-es/BeplyPluginTemplate', version: '1.5', ref: 'v1.5' })
+  data('.beply/template-sync.json', { defaultRef: 'v1.5', overwrite: [], createIfMissing: ['.github/workflows/release.yml', '.github/workflows/promote-prod.yml'], neverOverwrite: ['Init.php', 'Tools/manifest.json', 'docs/user/', 'docs/docs-sync/impact-map.json', 'docs/testing/ui-coverage-matrix.json'] })
+  data('Tools/manifest.json', { schemaVersion: 'beply.facturascripts-plugin-tools.v1', plugin: { name: 'BeplyPluginTemplate' }, executionPolicy: { humanReviewRequired: true }, tools: [], toolPacks: [], runtimeTools: [] })
+  data('docs/docs-sync/impact-map.json', { impacts: [{ id: 'demo', basePage: { path: 'base.md' }, pluginPage: { path: 'docs/user/modulo.md' }, surfaces: ['demo'], changes: { actions: [], flows: [] }, tests: ['demo'] }] })
+  data('docs/docs-sync/published-pages.json', { pages: [{ id: 'demo', publishedUrl: 'https://example.invalid/demo' }] })
+  data('docs/testing/ui-coverage-matrix.json', { surfaces: [] })
+  put('CHANGELOG.md', '## v1.5 - 2026-01-01\n')
+  const ref = 'facturascripts-ref: ${{ fromJSON(needs.quality_contract.outputs.fs_refs) }}'
+  put('.github/workflows/tests.yml', ['validate-template-contract.mjs', 'validate-docs-impact.mjs', 'read-facturascripts-matrix.mjs', ...Array(4).fill(`        ${ref}`)].join('\n') + '\n')
+  put('.github/workflows/release.yml', 'Verify Tests Workflow\nvalidate-docs-impact.mjs --require-ai\nuses: ./.github/workflows/reusable-immutable-plugin-candidate.yml\n')
+  put('.github/workflows/promote-prod.yml', 'uses: ./.github/workflows/reusable-promote-immutable-plugin-candidate.yml\n')
+  put('.github/workflows/reusable-immutable-plugin-candidate.yml', [
+    'workflow_call:', 'scripts/ci/build_plugin_zip.py', 'gh release download', '--repo "${GITHUB_REPOSITORY}"', 'pending_review',
+    'build_source_provenance_manifest.mjs', `uses: actions/upload-artifact@${'a'.repeat(40)}`,
+    'name: plugin-source-provenance-${{ github.run_id }}-${{ github.run_attempt }}', 'needs: source_provenance', 'sourceProvenance=${SOURCE_PROVENANCE_LOCATOR}',
+  ].join('\n'))
+  put('.github/workflows/reusable-promote-immutable-plugin-candidate.yml', [
+    'workflow_call:', 'gh release download', '--repo "${SOURCE_REPO_FULL_NAME}"', 'inputs.source_repo_full_name || github.repository',
+    'immutable_plugin_contract.py', 'dev_validation_run_id', 'dev_validation_head_sha', 'expected_checksum', 'expected_file_size', 'dev_candidate_version_id', 'pending_review',
+  ].join('\n'))
+}
 function fixture(fn, copy = false) {
   const dir = mkdtempSync(join(tmpdir(), 'fs-matrix-'))
   try {
-    if (copy) cpSync(root, dir, { recursive: true, filter: (path) => basename(path) !== '.git' })
+    if (copy) populate(dir)
     else mkdirSync(join(dir, '.beply'))
     fn(dir)
   } finally { rmSync(dir, { recursive: true, force: true }) }
@@ -29,7 +75,7 @@ function matrixTest(name, matrix, expected) {
     if (expected === null) assert.match(result.stderr, /^ERROR: /)
   }))
 }
-matrixTest('matriz de plantilla', template, ['v2026.3', 'v2026.2'])
+matrixTest('matriz de plantilla', template, template.supported.filter((item) => item.required).map((item) => item.ref))
 matrixTest('cores propios conservan el orden', other, ['v2025.71', 'v2026.65'])
 matrixTest('excluye entradas opcionales', { ...other, supported: [...other.supported, { ref: 'v2024.1', required: false }] }, ['v2025.71', 'v2026.65'])
 matrixTest('rechaza ausencia de requeridos', { ...other, supported: [{ ref: 'v2025.71', required: false }] }, null)
