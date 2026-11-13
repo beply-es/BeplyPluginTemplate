@@ -15,6 +15,9 @@ Solo tooling comun y contratos de trabajo:
 - `AGENTS.md`;
 - boilerplate legal o referencias solo si todavia no existen.
 
+Los dos workflows reutilizables se sincronizan para que el contrato local coincida
+con la plantilla aunque el plugin la llame fijada por SHA.
+
 ## Que no se sincroniza automaticamente
 
 - codigo del plugin;
