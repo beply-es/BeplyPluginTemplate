@@ -53,6 +53,51 @@ en la propia plantilla pública, que conserva su CI hospedada gratuita comparand
 `github.repository`; en cualquier copia esa rama nunca se cumple.
 `validate-template-contract.mjs` rechaza cualquier otra forma.
 
+## Dependencias de CI (`.beply/ci-dependencies.json`)
+
+Si los tests del plugin necesitan otros plugins de Beply (por ejemplo, un SAT que usa Proyectos y
+StockAvanzado), se declaran en `.beply/ci-dependencies.json`. El fichero es del plugin: la
+sincronización nunca lo crea ni lo sobrescribe. Sin él, o con `plugins` vacío, la CI es la de
+siempre: los huecos de checkout se saltan y el runtime recibe solo el plugin.
+
+```json
+{
+  "schema": 1,
+  "plugins": [
+    {
+      "repository": "beply-es/BeplyProyectos",
+      "ref": "<commit de 40 hex>",
+      "folder": "BeplyProyectos",
+      "sshKeySecret": "BEPLY_PROYECTOS_READ_KEY"
+    }
+  ]
+}
+```
+
+- `repository`: solo `beply-es/<repo>`, distinto del propio plugin.
+- `ref`: un commit exacto. No valen ramas ni tags, para que la CI no cambie sin un commit del plugin.
+- `folder`: el nombre de la carpeta en `Plugins/`, que es el `name` del `facturascripts.ini` de la
+  dependencia.
+- `sshKeySecret`: el **nombre** del secreto de Actions con la deploy key de solo lectura de ese
+  repositorio. Tiene que seguir el patrón `BEPLY_<REPO>_READ_KEY`. El valor nunca va en el fichero.
+  GitHub lo enmascara en los logs y el checkout no lo deja guardado (`persist-credentials: false`).
+- Como mucho 4 dependencias.
+
+`scripts/ci/read-ci-dependencies.mjs` valida la lista en Quality Contract. Si es inválida, Quality
+Contract falla y ningún job pesado arranca. Unit, Runtime y E2E clonan cada dependencia junto al
+plugin. Runtime y E2E pasan `CI_PLUGIN_FOLDERS=<plugin>,<deps>` y `CI_PLUGIN_DEPENDENCIES=<deps>` a
+`setup-runtime.php`. Con dependencias, `setup-runtime.php` prepara el core y la empresa antes de
+activar los plugins, y crea las tablas de todos en varias pasadas, porque unas apuntan a las de
+otro plugin. Sin dependencias, la secuencia no cambia. `test_ci_dependencies.mjs` y
+`test_ci_dependencies_workflow.py` fijan ambas cosas.
+
+El resto de la preparación propia del plugin no necesita la plantilla:
+
+- **Clases comunes de los tests runtime.** El `bootstrap` de `phpunit.runtime.xml.dist` (que no se
+  sincroniza) apunta a un fichero del plugin en `Test/`, que carga `.github/ci/runtime-bootstrap.php`
+  y después sus clases.
+- **Datos fijos de E2E.** Van en `globalSetup` y `globalTeardown` de Playwright, dentro de `tests/`.
+
 ## Gates
 
 `Tests` valida:
