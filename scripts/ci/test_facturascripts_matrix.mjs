@@ -66,23 +66,23 @@ function json(dir, path, value) { writeFileSync(join(dir, path), JSON.stringify(
 function run(dir, script, args = []) {
   return spawnSync(process.execPath, [join(root, script), ...args], { cwd: dir, encoding: 'utf8', env: { ...process.env, BEPLY_DOCS_AI_API_KEY: '', OPENAI_API_KEY: '', BEPLY_DOCS_AI_MODEL: '' } })
 }
-function matrixTest(name, matrix, expected) {
+function matrixTest(name, matrix, expected, error = /^ERROR: /) {
   test(name, () => fixture((dir) => {
     json(dir, '.beply/facturascripts-matrix.json', matrix)
     const result = run(dir, 'scripts/ci/read-facturascripts-matrix.mjs')
     assert.equal(result.status, expected === null ? 1 : 0, result.stderr)
     assert.equal(result.stdout, expected === null ? '' : `fs_refs=${JSON.stringify(expected)}\n`)
-    if (expected === null) assert.match(result.stderr, /^ERROR: /)
+    if (expected === null) assert.match(result.stderr, error)
   }))
 }
 matrixTest('matriz de plantilla', template, template.supported.filter((item) => item.required).map((item) => item.ref))
 matrixTest('cores propios conservan el orden', other, ['v2025.71', 'v2026.65'])
 matrixTest('excluye entradas opcionales', { ...other, supported: [...other.supported, { ref: 'v2024.1', required: false }] }, ['v2025.71', 'v2026.65'])
-matrixTest('rechaza ausencia de requeridos', { ...other, supported: [{ ref: 'v2025.71', required: false }] }, null)
+matrixTest('rechaza ausencia de requeridos', { ...other, supported: [{ ref: 'v2025.71', required: false }] }, null, /^ERROR: se requiere al menos un core/)
 matrixTest('rechaza ref inseguro', { defaultRef: 'main; echo x', supported: [{ ref: 'main; echo x', required: true }] }, null)
 matrixTest('rechaza default ajeno', { ...other, defaultRef: 'v2020.1' }, null)
 matrixTest('rechaza duplicados', { ...other, supported: [...other.supported, other.supported[0]] }, null)
-matrixTest('rechaza supported no array', { ...other, supported: {} }, null)
+matrixTest('rechaza supported no array', { ...other, supported: {} }, null, /^ERROR: supported debe ser un array/)
 test('rechaza archivo ausente y JSON inválido', () => fixture((dir) => {
   let result = run(dir, 'scripts/ci/read-facturascripts-matrix.mjs')
   assert.equal(result.status, 1); assert.equal(result.stdout, ''); assert.match(result.stderr, /^ERROR: /)
