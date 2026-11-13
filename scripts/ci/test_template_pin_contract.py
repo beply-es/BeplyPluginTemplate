@@ -6,12 +6,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[2]
 FILES = (
-    "facturascripts.ini",
-    ".github/workflows/release.yml",
-    ".github/workflows/promote-prod.yml",
     "scripts/ci/test_immutable_plugin_contract.py",
     "scripts/ci/build_plugin_zip.py",
     "scripts/ci/immutable_plugin_contract.py",
@@ -26,10 +25,25 @@ class TemplatePinContractTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        self.write_fixtures()
         for name in FILES:
             target = self.root / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / name, target)
+
+    def write_fixtures(self):
+        (self.root / "facturascripts.ini").write_text("name = BeplyPluginTemplate\n", encoding="utf-8")
+        workflows = self.root / ".github/workflows"
+        workflows.mkdir(parents=True, exist_ok=True)
+        for filename, job, workflow in (
+            ("release.yml", "publish_immutable_candidate", "reusable-immutable-plugin-candidate.yml"),
+            ("promote-prod.yml", "promote", "reusable-promote-immutable-plugin-candidate.yml"),
+        ):
+            (workflows / filename).write_text(
+                f"jobs:\n  {job}:\n    uses: ./.github/workflows/{workflow}\n"
+                "    with:\n      contract_sha: ${{ github.sha }}\n",
+                encoding="utf-8",
+            )
 
     def replace(self, name, old, new):
         path = self.root / name
@@ -94,6 +108,12 @@ class TemplatePinContractTests(unittest.TestCase):
 
     def append_job(self, workflow, key, uses, contract_sha=None):
         path = self.root / ".github/workflows" / workflow
+        content = path.read_text(encoding="utf-8")
+        doc = yaml.safe_load(content)
+        self.assertIsInstance(doc, dict)
+        self.assertEqual(next(reversed(doc)), "jobs")
+        self.assertIsInstance(doc["jobs"], dict)
+        self.assertTrue(content.rstrip().splitlines()[-1].startswith(" "))
         with path.open("a", encoding="utf-8") as output:
             output.write(f"\n  {key}:\n    uses: {uses}\n")
             if contract_sha is not None:
@@ -125,9 +145,7 @@ class TemplatePinContractTests(unittest.TestCase):
                 self.replace(promote, "candidate.yml@" + PIN, "candidate.yml@" + ref)
                 self.replace(promote, "contract_sha: " + PIN, "contract_sha: " + ref)
                 self.check_contract(False)
-                shutil.copyfile(ROOT / "facturascripts.ini", self.root / "facturascripts.ini")
-                shutil.copyfile(ROOT / path, self.root / path)
-                shutil.copyfile(ROOT / ".github/workflows/promote-prod.yml", self.root / ".github/workflows/promote-prod.yml")
+                self.write_fixtures()
 
     def test_extra_candidate_matching_pin(self):
         self.as_plugin()
