@@ -1,5 +1,4 @@
 import json
-import re
 import subprocess
 import tempfile
 import unittest
@@ -9,17 +8,6 @@ SYNC = Path(__file__).resolve().parents[1] / 'template' / 'sync-template.mjs'
 
 
 class TemplateSyncShaTest(unittest.TestCase):
-    def test_template_policy_overwrites_both_reusable_workflows(self):
-        root = Path(__file__).resolve().parents[2]
-        ini = (root / 'facturascripts.ini').read_text(encoding='utf-8')
-        if re.search(r'^name\s*=\s*["\']?BeplyPluginTemplate["\']?\s*$', ini, re.MULTILINE) is None:
-            self.skipTest('La politica canonica de la plantilla no es la politica propia del plugin')
-        policy = json.loads((root / '.beply/template-sync.json').read_text(encoding='utf-8'))
-        for name in ('reusable-immutable-plugin-candidate.yml',
-                     'reusable-promote-immutable-plugin-candidate.yml'):
-            with self.subTest(workflow=name):
-                self.assertIn(f'.github/workflows/{name}', policy['overwrite'])
-
     def test_sync_records_the_actual_source_commit_as_sha(self):
         with tempfile.TemporaryDirectory(prefix='t371-template-sync-') as tmp:
             root = Path(tmp)

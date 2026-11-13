@@ -34,7 +34,7 @@ function populate(dir) {
   put('facturascripts.ini', 'name = BeplyPluginTemplate\nversion = 1.5\nmin_php = 8.2\n')
   data('.beply/facturascripts-matrix.json', { defaultRef: 'v2026.3', supported: [{ ref: 'v2026.3', required: true }, { ref: 'v2026.2', required: true }] })
   data('.beply/template-lock.json', { template: 'beply-es/BeplyPluginTemplate', version: '1.5', ref: 'v1.5' })
-  data('.beply/template-sync.json', { defaultRef: 'v1.5', overwrite: [], createIfMissing: ['.github/workflows/release.yml', '.github/workflows/promote-prod.yml'], neverOverwrite: ['Init.php', 'Tools/manifest.json', 'docs/user/', 'docs/docs-sync/impact-map.json', 'docs/testing/ui-coverage-matrix.json'] })
+  data('.beply/template-sync.json', { defaultRef: 'v1.5', overwrite: ['.github/workflows/reusable-immutable-plugin-candidate.yml', '.github/workflows/reusable-promote-immutable-plugin-candidate.yml'], createIfMissing: ['.github/workflows/release.yml', '.github/workflows/promote-prod.yml'], neverOverwrite: ['Init.php', 'Tools/manifest.json', 'docs/user/', 'docs/docs-sync/impact-map.json', 'docs/testing/ui-coverage-matrix.json'] })
   data('Tools/manifest.json', { schemaVersion: 'beply.facturascripts-plugin-tools.v1', plugin: { name: 'BeplyPluginTemplate' }, executionPolicy: { humanReviewRequired: true }, tools: [], toolPacks: [], runtimeTools: [] })
   data('docs/docs-sync/impact-map.json', { impacts: [{ id: 'demo', basePage: { path: 'base.md' }, pluginPage: { path: 'docs/user/modulo.md' }, surfaces: ['demo'], changes: { actions: [], flows: [] }, tests: ['demo'] }] })
   data('docs/docs-sync/published-pages.json', { pages: [{ id: 'demo', publishedUrl: 'https://example.invalid/demo' }] })
