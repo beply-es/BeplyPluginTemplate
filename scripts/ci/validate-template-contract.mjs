@@ -146,6 +146,11 @@ for (const adapter of ['.github/workflows/release.yml', '.github/workflows/promo
   }
 }
 if (isTemplate) {
+  for (const workflow of ['.github/workflows/reusable-immutable-plugin-candidate.yml', '.github/workflows/reusable-promote-immutable-plugin-candidate.yml']) {
+    if (!(templateSync.overwrite || []).includes(workflow)) {
+      fail(`template-sync must overwrite reusable workflow ${workflow}`)
+    }
+  }
   for (const ref of ['v2026.3', 'v2026.2']) {
     if (!requiredRefs.includes(ref)) {
       fail(`FacturaScripts matrix must require ${ref}`)
