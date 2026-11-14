@@ -118,6 +118,12 @@ class CiDependenciesWorkflowTests(unittest.TestCase):
     def test_sync_policy_never_overwrites_the_plugin_list(self):
         import json
         policy = json.loads((ROOT / ".beply/template-sync.json").read_text(encoding="utf-8"))
+        self.assertNotIn(".beply/ci-dependencies.json", policy.get("overwrite", []) + policy.get("createIfMissing", []))
+        ini = (ROOT / "facturascripts.ini").read_text(encoding="utf-8")
+        if not re.search(r"^name\s*=\s*['\"]?BeplyPluginTemplate['\"]?\s*$", ini, re.MULTILINE):
+            # En un plugin, la política que manda en el sync es la de la plantilla (--template-root);
+            # su copia local se crea una vez y no se actualiza, así que aquí no se le exige más.
+            return
         self.assertIn(".beply/ci-dependencies.json", policy["neverOverwrite"])
         self.assertNotIn(".beply/ci-dependencies.json", policy["overwrite"] + policy["createIfMissing"])
         for script in ("scripts/ci/read-ci-dependencies.mjs", "scripts/ci/test_ci_dependencies.mjs",
