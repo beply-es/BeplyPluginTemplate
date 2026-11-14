@@ -210,6 +210,33 @@ class E2eServerParityTests(unittest.TestCase):
         self.assertIn("php-server.log", diagnostics["run"])
         self.assertLess(step_index(self.steps, "Run Playwright suite"), step_index(self.steps, "Print PHP server diagnostics"))
 
+    def run_server_block(self, fake_php, *, kill=False):
+        import os, signal, subprocess, tempfile, time
+        run = self.step("Start PHP server")["run"]
+        with tempfile.TemporaryDirectory(prefix="e2e-server-") as tmp:
+            bin_dir = Path(tmp, "bin"); bin_dir.mkdir()
+            php = bin_dir / "php"; php.write_text("#!/bin/sh\n" + fake_php + "\n"); php.chmod(0o755)
+            env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "RUNNER_TEMP": tmp, "PLUGIN_FOLDER": "Demo"}
+            # GitHub ejecuta cada run con «bash -e {0}».
+            script = Path(tmp, "step.sh"); script.write_text(run)
+            subprocess.run(["bash", "-e", str(script)], env=env, cwd=tmp, check=True, timeout=10)
+            log, pid_file = Path(tmp, "Demo-php-server.log"), Path(tmp, "Demo-php-server.pid")
+            deadline = time.time() + 10
+            if kill:
+                while not (pid_file.exists() and pid_file.read_text().strip()) and time.time() < deadline:
+                    time.sleep(0.05)
+                os.kill(int(pid_file.read_text()), signal.SIGTERM)
+            while "exited with status" not in (log.read_text() if log.exists() else "") and time.time() < deadline:
+                time.sleep(0.05)
+            return log.read_text() if log.exists() else ""
+
+    def test_a_crashing_server_leaves_its_exit_status_under_bash_e(self):
+        self.assertIn("PHP server exited with status 3", self.run_server_block("exit 3"))
+        self.assertIn("PHP server exited with status 139", self.run_server_block("kill -SEGV $$"))
+
+    def test_a_stopped_server_leaves_its_exit_status_under_bash_e(self):
+        self.assertIn("PHP server exited with status 143", self.run_server_block("exec sleep 30", kill=True))
+
     def test_artifacts_are_unique_per_matrix_entry(self):
         upload = self.step("Upload Playwright artifacts")
         self.assertIn("${{ matrix.facturascripts-ref }}", upload["with"]["name"])

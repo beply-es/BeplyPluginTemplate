@@ -727,8 +727,9 @@ jobs:
           (
             php -d memory_limit=256M -d opcache.jit_buffer_size=0 -S 127.0.0.1:8765 index.php &
             echo $! > "${RUNNER_TEMP}/${PLUGIN_FOLDER}-php-server.pid"
-            wait $!
-            echo "PHP server exited with status $?"
+            status=0
+            wait $! || status=$?
+            echo "PHP server exited with status ${status}"
           ) > "${RUNNER_TEMP}/${PLUGIN_FOLDER}-php-server.log" 2>&1 &
 
       - name: Wait for application
