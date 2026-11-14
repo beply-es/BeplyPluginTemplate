@@ -106,6 +106,12 @@ test('JSON inválido, esquema o claves desconocidas se rechazan', () => {
 
 test('solo repositorios de beply-es', () => {
   rejects({ schema: 1, plugins: [dep({ repository: 'NeoRazorX/facturascripts' })] }, /repository/)
+  // Otra organización, también en minúsculas o con un nombre que empieza por beply-es.
+  for (const repository of ['otra-org/BeplyProyectos', 'beply-es-evil/BeplyProyectos', 'beply-esx/BeplyProyectos', 'beply/BeplyProyectos']) {
+    rejects({ schema: 1, plugins: [dep({ repository })] }, /repository/)
+  }
+  // '..' dentro del nombre, que la expresión de caracteres sola admitiría.
+  rejects({ schema: 1, plugins: [dep({ repository: 'beply-es/a..b' })] }, /repository/)
   rejects({ schema: 1, plugins: [dep({ repository: 'beply-es/../otro' })] }, /repository/)
   rejects({ schema: 1, plugins: [dep({ repository: 'beply-es/A\nB' })] }, /repository/)
   rejects({ schema: 1, plugins: [dep({ repository: 'beply-es/BeplyDemo' })] }, /propio plugin/)
