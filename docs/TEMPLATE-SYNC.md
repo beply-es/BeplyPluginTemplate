@@ -53,9 +53,11 @@ node scripts/template/sync-template.mjs --template-root /ruta/BeplyPluginTemplat
 El script falla si el repo tiene cambios sin commit, salvo que se use
 `--allow-dirty`. La fuente de plantilla debe ser un checkout Git limpio, sin
 archivos ignorados, y su
-commit se registra en `commit` y `sha`; un SHA completo suministrado con `--ref`
-debe coincidir con ese commit. `--allow-dirty` no permite una fuente de plantilla
-sucia. Despues de aplicar, revisar diff y ejecutar tests.
+commit se registra en `commit` y `sha`. Cualquier `--ref` suministrado debe
+resolver a ese commit antes de copiar archivos; si se usa `--template-root`
+sin `--ref`, el lock registra el SHA del checkout como `ref`. `--allow-dirty`
+no permite una fuente de plantilla sucia. Despues de aplicar, revisar diff y
+ejecutar tests.
 
 ## Migracion del contrato inmutable
 

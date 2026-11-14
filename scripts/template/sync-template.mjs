@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { dirname, resolve } from 'node:path'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 
 const root = process.cwd()
@@ -35,7 +35,7 @@ const apply = flags.has('--apply')
 const allowDirty = flags.has('--allow-dirty')
 const repo = args.get('--repo') || process.env.BEPLY_TEMPLATE_REPO || 'https://github.com/beply-es/BeplyPluginTemplate.git'
 const templateRootArg = args.get('--template-root')
-const targetRef = args.get('--ref') || process.env.BEPLY_TEMPLATE_REF || readLocalDefaultRef()
+const targetRef = args.get('--ref') || process.env.BEPLY_TEMPLATE_REF || (templateRootArg ? '' : readLocalDefaultRef())
 
 if (apply && !allowDirty && isGitDirty(root)) {
   console.error('ERROR: working tree has local changes. Commit/stash first or pass --allow-dirty.')
@@ -71,7 +71,7 @@ try {
     if (!/^[0-9a-f]{40}$/.test(sourceCommit) || top !== resolve(templateRoot) || !isPristineTemplate(templateRoot)) {
       throw new Error('template must be a pristine Git checkout with a known commit')
     }
-    if (/^[0-9a-f]{40}$/.test(targetRef) && targetRef !== sourceCommit) {
+    if (targetRef && gitRefCommit(templateRoot, targetRef) !== sourceCommit) {
       throw new Error('template ref does not match checkout commit')
     }
   }
@@ -188,6 +188,14 @@ function gitTopLevel(cwd) {
   }
 }
 
+function gitRefCommit(cwd, ref) {
+  const result = spawnSync('git', ['-c', 'core.warnAmbiguousRefs=true', 'rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`], {
+    cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  if (result.status !== 0 || result.stderr.trim() !== '') return ''
+  return result.stdout.trim()
+}
+
 function printPlan({ templateRoot, targetRef, overwrite, createIfMissing, neverOverwrite }) {
   console.log(`Template source: ${templateRoot}`)
   console.log(`Template ref: ${targetRef || '(local)'}`)
@@ -213,7 +221,7 @@ function updateTemplateLock({ repo, targetRef, templateRoot, sourceCommit }) {
     schema: 1,
     template: sourceLock.template || repo,
     version: sourceLock.version || targetRef.replace(/^v/, ''),
-    ref: targetRef || sourceLock.ref || '',
+    ref: targetRef || sourceCommit,
     commit: sourceCommit,
     sha: sourceCommit,
     syncedAt: new Date().toISOString(),
