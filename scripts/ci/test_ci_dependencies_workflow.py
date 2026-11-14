@@ -177,5 +177,37 @@ class SetupRuntimeSequenceTests(unittest.TestCase):
         self.assertIn("RuntimeException", body.group(1))
 
 
+class E2eServerParityTests(unittest.TestCase):
+    """El servidor E2E corre con el PHP del runtime de tenant: JIT apagado (opcache.jit_buffer_size=0)
+    y memory_limit 256M, como zz-runtime-prod.ini. setup-php enciende el JIT (1235, 128M) y en arm64
+    PHP 8.2.35 da segfault en execute_ex sirviendo BeplyServicios (TAREA-647.5, run 43533389191);
+    con el JIT apagado, 7/7 en los tres núcleos (run 43534923230). Si el servidor cae, el job lo dice
+    con su estado de salida y el final de su log, no solo con ERR_CONNECTION_REFUSED."""
+
+    def setUp(self):
+        self.steps = load()["jobs"]["e2e"]["steps"]
+
+    def step(self, name):
+        return self.steps[step_index(self.steps, name)]
+
+    def test_server_runs_with_the_tenant_runtime_php_settings(self):
+        run = self.step("Start PHP server")["run"]
+        self.assertIn("-d opcache.jit_buffer_size=0", run)
+        self.assertIn("-d memory_limit=256M", run)
+        self.assertIn("-S 127.0.0.1:8765 index.php", run)
+
+    def test_server_exit_status_is_recorded_and_printed_on_failure(self):
+        run = self.step("Start PHP server")["run"]
+        self.assertIn('PHP server exited with status', run)
+        diagnostics = self.step("Print PHP server diagnostics")
+        self.assertEqual("failure() && steps.e2e-targets.outputs.has_tests == 'true'", diagnostics["if"])
+        self.assertIn("php-server.log", diagnostics["run"])
+        self.assertLess(step_index(self.steps, "Run Playwright suite"), step_index(self.steps, "Print PHP server diagnostics"))
+
+    def test_artifacts_are_unique_per_matrix_entry(self):
+        upload = self.step("Upload Playwright artifacts")
+        self.assertIn("${{ matrix.facturascripts-ref }}", upload["with"]["name"])
+
+
 if __name__ == "__main__":
     unittest.main()

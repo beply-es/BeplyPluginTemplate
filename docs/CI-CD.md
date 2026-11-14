@@ -95,6 +95,12 @@ activar los plugins, y crea las tablas de todos en varias pasadas, porque unas a
 otro plugin. Sin dependencias, la secuencia no cambia. `test_ci_dependencies.mjs` y
 `test_ci_dependencies_workflow.py` fijan ambas cosas.
 
+El servidor de E2E (`php -S`) usa el mismo PHP que el runtime de tenant: el JIT apagado
+(`opcache.jit_buffer_size=0`) y `memory_limit=256M`. setup-php enciende el JIT, y PHP 8.2 en arm64
+da segfault con él al servir BeplyServicios. En el runtime de tenant el JIT no está activo, así que
+apagarlo en CI no esconde nada: alinea la CI con PROD. Si el servidor cae, el job imprime su estado
+de salida y el final de su log.
+
 El resto de la preparación propia del plugin no necesita la plantilla:
 
 - **Clases comunes de los tests runtime.** El `bootstrap` de `phpunit.runtime.xml.dist` (que no se

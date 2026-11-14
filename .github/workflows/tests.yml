@@ -720,9 +720,16 @@ jobs:
       - name: Start PHP server
         if: steps.e2e-targets.outputs.has_tests == 'true'
         working-directory: facturascripts
+        # Mismo PHP que el runtime de tenant (zz-runtime-prod.ini): JIT apagado y 256M. setup-php
+        # enciende el JIT (1235, 128M) y PHP 8.2 en arm64 da segfault con él (TAREA-647.5). Si el
+        # servidor cae, su estado de salida queda al final del log.
         run: |
-          php -S 127.0.0.1:8765 index.php > "${RUNNER_TEMP}/${PLUGIN_FOLDER}-php-server.log" 2>&1 &
-          echo $! > "${RUNNER_TEMP}/${PLUGIN_FOLDER}-php-server.pid"
+          (
+            php -d memory_limit=256M -d opcache.jit_buffer_size=0 -S 127.0.0.1:8765 index.php &
+            echo $! > "${RUNNER_TEMP}/${PLUGIN_FOLDER}-php-server.pid"
+            wait $!
+            echo "PHP server exited with status $?"
+          ) > "${RUNNER_TEMP}/${PLUGIN_FOLDER}-php-server.log" 2>&1 &
 
       - name: Wait for application
         if: steps.e2e-targets.outputs.has_tests == 'true'
@@ -743,11 +750,21 @@ jobs:
           BASE_URL: http://127.0.0.1:8765
         run: npx playwright test
 
+      - name: Print PHP server diagnostics
+        if: failure() && steps.e2e-targets.outputs.has_tests == 'true'
+        run: |
+          log_file="${RUNNER_TEMP}/${PLUGIN_FOLDER}-php-server.log"
+          if [ -f "${log_file}" ]; then
+            grep -v -E '\] [0-9.:]+ (Accepted|Closing)$' "${log_file}" | tail -n 100
+          else
+            echo "::warning::PHP server log is unavailable."
+          fi
+
       - name: Upload Playwright artifacts
         if: failure() && steps.e2e-targets.outputs.has_tests == 'true'
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
         with:
-          name: ${{ env.PLUGIN_FOLDER }}-e2e-artifacts
+          name: ${{ env.PLUGIN_FOLDER }}-${{ matrix.facturascripts-ref }}-e2e-artifacts
           path: |
             facturascripts/${{ steps.e2e-targets.outputs.tests_dir }}/playwright-report
             facturascripts/${{ steps.e2e-targets.outputs.tests_dir }}/test-results
