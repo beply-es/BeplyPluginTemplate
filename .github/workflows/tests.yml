@@ -31,6 +31,25 @@ jobs:
 
     outputs:
       fs_refs: ${{ steps.fs-matrix.outputs.fs_refs }}
+      has_dependencies: ${{ steps.ci-deps.outputs.has_dependencies }}
+      plugin_folders: ${{ steps.ci-deps.outputs.plugin_folders }}
+      dependency_folders: ${{ steps.ci-deps.outputs.dependency_folders }}
+      dep1_repository: ${{ steps.ci-deps.outputs.dep1_repository }}
+      dep1_ref: ${{ steps.ci-deps.outputs.dep1_ref }}
+      dep1_folder: ${{ steps.ci-deps.outputs.dep1_folder }}
+      dep1_ssh_key_secret: ${{ steps.ci-deps.outputs.dep1_ssh_key_secret }}
+      dep2_repository: ${{ steps.ci-deps.outputs.dep2_repository }}
+      dep2_ref: ${{ steps.ci-deps.outputs.dep2_ref }}
+      dep2_folder: ${{ steps.ci-deps.outputs.dep2_folder }}
+      dep2_ssh_key_secret: ${{ steps.ci-deps.outputs.dep2_ssh_key_secret }}
+      dep3_repository: ${{ steps.ci-deps.outputs.dep3_repository }}
+      dep3_ref: ${{ steps.ci-deps.outputs.dep3_ref }}
+      dep3_folder: ${{ steps.ci-deps.outputs.dep3_folder }}
+      dep3_ssh_key_secret: ${{ steps.ci-deps.outputs.dep3_ssh_key_secret }}
+      dep4_repository: ${{ steps.ci-deps.outputs.dep4_repository }}
+      dep4_ref: ${{ steps.ci-deps.outputs.dep4_ref }}
+      dep4_folder: ${{ steps.ci-deps.outputs.dep4_folder }}
+      dep4_ssh_key_secret: ${{ steps.ci-deps.outputs.dep4_ssh_key_secret }}
 
     steps:
       - name: Checkout Plugin
@@ -53,6 +72,12 @@ jobs:
         id: fs-matrix
         run: node scripts/ci/read-facturascripts-matrix.mjs >> "$GITHUB_OUTPUT"
 
+      # Otros plugins de beply-es que Unit, Runtime y E2E necesitan: repositorio, commit y NOMBRE
+      # de la clave de lectura. Sin .beply/ci-dependencies.json, solo el propio plugin.
+      - name: Read CI dependencies
+        id: ci-deps
+        run: node scripts/ci/read-ci-dependencies.mjs >> "$GITHUB_OUTPUT"
+
       # ARC's system Python has no PyYAML (GitHub-hosted images did); pinned, in a venv.
       - name: Unit test immutable plugin artifact contract
         run: |
@@ -61,6 +86,7 @@ jobs:
           "${RUNNER_TEMP}/contract-venv/bin/python" -m unittest scripts/ci/test_immutable_plugin_contract.py
           "${RUNNER_TEMP}/contract-venv/bin/python" -m unittest scripts.ci.test_package_policy scripts.ci.test_template_sync_sha
           "${RUNNER_TEMP}/contract-venv/bin/python" -m unittest scripts.ci.test_template_pin_contract
+          "${RUNNER_TEMP}/contract-venv/bin/python" -m unittest scripts.ci.test_ci_dependencies_workflow
 
       - name: Unit test one Tests run per SHA and draft PR gating
         run: python3 .github/ci/test_tests_workflow_triggers.py
@@ -69,6 +95,7 @@ jobs:
         run: |
           node --test scripts/ci/test_source_provenance_manifest.mjs
           node --test scripts/ci/test_facturascripts_matrix.mjs
+          node --test scripts/ci/test_ci_dependencies.mjs
           node --test scripts/ci/test_tools_contract.mjs
 
       - name: Validate documentation impact
@@ -171,6 +198,75 @@ jobs:
         with:
           path: facturascripts/Plugins/${{ env.PLUGIN_FOLDER }}
           fetch-depth: 0
+
+      # Solo el NOMBRE y si existe (true/false): el valor no llega a este paso. Un secreto que
+      # falta es rojo con su nombre, nunca un checkout anónimo.
+      - name: Check CI dependency keys
+        if: needs.quality_contract.outputs.has_dependencies == 'true'
+        env:
+          DEP1_SECRET: ${{ needs.quality_contract.outputs.dep1_ssh_key_secret }}
+          DEP1_KEY_SET: ${{ secrets[needs.quality_contract.outputs.dep1_ssh_key_secret] != '' }}
+          DEP2_SECRET: ${{ needs.quality_contract.outputs.dep2_ssh_key_secret }}
+          DEP2_KEY_SET: ${{ secrets[needs.quality_contract.outputs.dep2_ssh_key_secret] != '' }}
+          DEP3_SECRET: ${{ needs.quality_contract.outputs.dep3_ssh_key_secret }}
+          DEP3_KEY_SET: ${{ secrets[needs.quality_contract.outputs.dep3_ssh_key_secret] != '' }}
+          DEP4_SECRET: ${{ needs.quality_contract.outputs.dep4_ssh_key_secret }}
+          DEP4_KEY_SET: ${{ secrets[needs.quality_contract.outputs.dep4_ssh_key_secret] != '' }}
+        run: |
+          missing=0
+          for n in 1 2 3 4; do
+            name_var="DEP${n}_SECRET"
+            set_var="DEP${n}_KEY_SET"
+            if [ -n "${!name_var}" ] && [ "${!set_var}" != "true" ]; then
+              echo "::error::Falta el secreto ${!name_var} (deploy key de solo lectura declarada en .beply/ci-dependencies.json)."
+              missing=1
+            fi
+          done
+          exit "${missing}"
+
+      # Plugin de beply-es declarado en .beply/ci-dependencies.json; sin lista, se salta.
+      - name: Checkout CI dependency 1
+        if: needs.quality_contract.outputs.dep1_repository != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ needs.quality_contract.outputs.dep1_repository }}
+          ref: ${{ needs.quality_contract.outputs.dep1_ref }}
+          ssh-key: ${{ secrets[needs.quality_contract.outputs.dep1_ssh_key_secret] }}
+          path: facturascripts/Plugins/${{ needs.quality_contract.outputs.dep1_folder }}
+          persist-credentials: false
+
+      # Plugin de beply-es declarado en .beply/ci-dependencies.json; sin lista, se salta.
+      - name: Checkout CI dependency 2
+        if: needs.quality_contract.outputs.dep2_repository != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ needs.quality_contract.outputs.dep2_repository }}
+          ref: ${{ needs.quality_contract.outputs.dep2_ref }}
+          ssh-key: ${{ secrets[needs.quality_contract.outputs.dep2_ssh_key_secret] }}
+          path: facturascripts/Plugins/${{ needs.quality_contract.outputs.dep2_folder }}
+          persist-credentials: false
+
+      # Plugin de beply-es declarado en .beply/ci-dependencies.json; sin lista, se salta.
+      - name: Checkout CI dependency 3
+        if: needs.quality_contract.outputs.dep3_repository != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ needs.quality_contract.outputs.dep3_repository }}
+          ref: ${{ needs.quality_contract.outputs.dep3_ref }}
+          ssh-key: ${{ secrets[needs.quality_contract.outputs.dep3_ssh_key_secret] }}
+          path: facturascripts/Plugins/${{ needs.quality_contract.outputs.dep3_folder }}
+          persist-credentials: false
+
+      # Plugin de beply-es declarado en .beply/ci-dependencies.json; sin lista, se salta.
+      - name: Checkout CI dependency 4
+        if: needs.quality_contract.outputs.dep4_repository != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ needs.quality_contract.outputs.dep4_repository }}
+          ref: ${{ needs.quality_contract.outputs.dep4_ref }}
+          ssh-key: ${{ secrets[needs.quality_contract.outputs.dep4_ssh_key_secret] }}
+          path: facturascripts/Plugins/${{ needs.quality_contract.outputs.dep4_folder }}
+          persist-credentials: false
 
       - name: Setup PHP with PCOV
         uses: shivammathur/setup-php@accd6127cb78bee3e8082180cb391013d204ef9f # 2.37.0
@@ -281,6 +377,75 @@ jobs:
           path: facturascripts/Plugins/${{ env.PLUGIN_FOLDER }}
           fetch-depth: 0
 
+      # Solo el NOMBRE y si existe (true/false): el valor no llega a este paso. Un secreto que
+      # falta es rojo con su nombre, nunca un checkout anónimo.
+      - name: Check CI dependency keys
+        if: needs.quality_contract.outputs.has_dependencies == 'true'
+        env:
+          DEP1_SECRET: ${{ needs.quality_contract.outputs.dep1_ssh_key_secret }}
+          DEP1_KEY_SET: ${{ secrets[needs.quality_contract.outputs.dep1_ssh_key_secret] != '' }}
+          DEP2_SECRET: ${{ needs.quality_contract.outputs.dep2_ssh_key_secret }}
+          DEP2_KEY_SET: ${{ secrets[needs.quality_contract.outputs.dep2_ssh_key_secret] != '' }}
+          DEP3_SECRET: ${{ needs.quality_contract.outputs.dep3_ssh_key_secret }}
+          DEP3_KEY_SET: ${{ secrets[needs.quality_contract.outputs.dep3_ssh_key_secret] != '' }}
+          DEP4_SECRET: ${{ needs.quality_contract.outputs.dep4_ssh_key_secret }}
+          DEP4_KEY_SET: ${{ secrets[needs.quality_contract.outputs.dep4_ssh_key_secret] != '' }}
+        run: |
+          missing=0
+          for n in 1 2 3 4; do
+            name_var="DEP${n}_SECRET"
+            set_var="DEP${n}_KEY_SET"
+            if [ -n "${!name_var}" ] && [ "${!set_var}" != "true" ]; then
+              echo "::error::Falta el secreto ${!name_var} (deploy key de solo lectura declarada en .beply/ci-dependencies.json)."
+              missing=1
+            fi
+          done
+          exit "${missing}"
+
+      # Plugin de beply-es declarado en .beply/ci-dependencies.json; sin lista, se salta.
+      - name: Checkout CI dependency 1
+        if: needs.quality_contract.outputs.dep1_repository != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ needs.quality_contract.outputs.dep1_repository }}
+          ref: ${{ needs.quality_contract.outputs.dep1_ref }}
+          ssh-key: ${{ secrets[needs.quality_contract.outputs.dep1_ssh_key_secret] }}
+          path: facturascripts/Plugins/${{ needs.quality_contract.outputs.dep1_folder }}
+          persist-credentials: false
+
+      # Plugin de beply-es declarado en .beply/ci-dependencies.json; sin lista, se salta.
+      - name: Checkout CI dependency 2
+        if: needs.quality_contract.outputs.dep2_repository != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ needs.quality_contract.outputs.dep2_repository }}
+          ref: ${{ needs.quality_contract.outputs.dep2_ref }}
+          ssh-key: ${{ secrets[needs.quality_contract.outputs.dep2_ssh_key_secret] }}
+          path: facturascripts/Plugins/${{ needs.quality_contract.outputs.dep2_folder }}
+          persist-credentials: false
+
+      # Plugin de beply-es declarado en .beply/ci-dependencies.json; sin lista, se salta.
+      - name: Checkout CI dependency 3
+        if: needs.quality_contract.outputs.dep3_repository != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ needs.quality_contract.outputs.dep3_repository }}
+          ref: ${{ needs.quality_contract.outputs.dep3_ref }}
+          ssh-key: ${{ secrets[needs.quality_contract.outputs.dep3_ssh_key_secret] }}
+          path: facturascripts/Plugins/${{ needs.quality_contract.outputs.dep3_folder }}
+          persist-credentials: false
+
+      # Plugin de beply-es declarado en .beply/ci-dependencies.json; sin lista, se salta.
+      - name: Checkout CI dependency 4
+        if: needs.quality_contract.outputs.dep4_repository != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ needs.quality_contract.outputs.dep4_repository }}
+          ref: ${{ needs.quality_contract.outputs.dep4_ref }}
+          ssh-key: ${{ secrets[needs.quality_contract.outputs.dep4_ssh_key_secret] }}
+          path: facturascripts/Plugins/${{ needs.quality_contract.outputs.dep4_folder }}
+          persist-credentials: false
+
       - name: Setup PHP
         uses: shivammathur/setup-php@accd6127cb78bee3e8082180cb391013d204ef9f # 2.37.0
         with:
@@ -347,7 +512,8 @@ jobs:
         if: steps.runtime-targets.outputs.has_tests == 'true'
         working-directory: facturascripts
         env:
-          CI_PLUGIN_FOLDERS: ${{ env.PLUGIN_FOLDER }}
+          CI_PLUGIN_FOLDERS: ${{ needs.quality_contract.outputs.plugin_folders }}
+          CI_PLUGIN_DEPENDENCIES: ${{ needs.quality_contract.outputs.dependency_folders }}
         run: php Plugins/${PLUGIN_FOLDER}/.github/ci/setup-runtime.php
 
       - name: Run PHPUnit runtime suite
@@ -397,6 +563,75 @@ jobs:
         with:
           path: facturascripts/Plugins/${{ env.PLUGIN_FOLDER }}
           fetch-depth: 0
+
+      # Solo el NOMBRE y si existe (true/false): el valor no llega a este paso. Un secreto que
+      # falta es rojo con su nombre, nunca un checkout anónimo.
+      - name: Check CI dependency keys
+        if: needs.quality_contract.outputs.has_dependencies == 'true'
+        env:
+          DEP1_SECRET: ${{ needs.quality_contract.outputs.dep1_ssh_key_secret }}
+          DEP1_KEY_SET: ${{ secrets[needs.quality_contract.outputs.dep1_ssh_key_secret] != '' }}
+          DEP2_SECRET: ${{ needs.quality_contract.outputs.dep2_ssh_key_secret }}
+          DEP2_KEY_SET: ${{ secrets[needs.quality_contract.outputs.dep2_ssh_key_secret] != '' }}
+          DEP3_SECRET: ${{ needs.quality_contract.outputs.dep3_ssh_key_secret }}
+          DEP3_KEY_SET: ${{ secrets[needs.quality_contract.outputs.dep3_ssh_key_secret] != '' }}
+          DEP4_SECRET: ${{ needs.quality_contract.outputs.dep4_ssh_key_secret }}
+          DEP4_KEY_SET: ${{ secrets[needs.quality_contract.outputs.dep4_ssh_key_secret] != '' }}
+        run: |
+          missing=0
+          for n in 1 2 3 4; do
+            name_var="DEP${n}_SECRET"
+            set_var="DEP${n}_KEY_SET"
+            if [ -n "${!name_var}" ] && [ "${!set_var}" != "true" ]; then
+              echo "::error::Falta el secreto ${!name_var} (deploy key de solo lectura declarada en .beply/ci-dependencies.json)."
+              missing=1
+            fi
+          done
+          exit "${missing}"
+
+      # Plugin de beply-es declarado en .beply/ci-dependencies.json; sin lista, se salta.
+      - name: Checkout CI dependency 1
+        if: needs.quality_contract.outputs.dep1_repository != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ needs.quality_contract.outputs.dep1_repository }}
+          ref: ${{ needs.quality_contract.outputs.dep1_ref }}
+          ssh-key: ${{ secrets[needs.quality_contract.outputs.dep1_ssh_key_secret] }}
+          path: facturascripts/Plugins/${{ needs.quality_contract.outputs.dep1_folder }}
+          persist-credentials: false
+
+      # Plugin de beply-es declarado en .beply/ci-dependencies.json; sin lista, se salta.
+      - name: Checkout CI dependency 2
+        if: needs.quality_contract.outputs.dep2_repository != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ needs.quality_contract.outputs.dep2_repository }}
+          ref: ${{ needs.quality_contract.outputs.dep2_ref }}
+          ssh-key: ${{ secrets[needs.quality_contract.outputs.dep2_ssh_key_secret] }}
+          path: facturascripts/Plugins/${{ needs.quality_contract.outputs.dep2_folder }}
+          persist-credentials: false
+
+      # Plugin de beply-es declarado en .beply/ci-dependencies.json; sin lista, se salta.
+      - name: Checkout CI dependency 3
+        if: needs.quality_contract.outputs.dep3_repository != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ needs.quality_contract.outputs.dep3_repository }}
+          ref: ${{ needs.quality_contract.outputs.dep3_ref }}
+          ssh-key: ${{ secrets[needs.quality_contract.outputs.dep3_ssh_key_secret] }}
+          path: facturascripts/Plugins/${{ needs.quality_contract.outputs.dep3_folder }}
+          persist-credentials: false
+
+      # Plugin de beply-es declarado en .beply/ci-dependencies.json; sin lista, se salta.
+      - name: Checkout CI dependency 4
+        if: needs.quality_contract.outputs.dep4_repository != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ needs.quality_contract.outputs.dep4_repository }}
+          ref: ${{ needs.quality_contract.outputs.dep4_ref }}
+          ssh-key: ${{ secrets[needs.quality_contract.outputs.dep4_ssh_key_secret] }}
+          path: facturascripts/Plugins/${{ needs.quality_contract.outputs.dep4_folder }}
+          persist-credentials: false
 
       - name: Setup PHP
         uses: shivammathur/setup-php@accd6127cb78bee3e8082180cb391013d204ef9f # 2.37.0
@@ -471,7 +706,8 @@ jobs:
         if: steps.e2e-targets.outputs.has_tests == 'true'
         working-directory: facturascripts
         env:
-          CI_PLUGIN_FOLDERS: ${{ env.PLUGIN_FOLDER }}
+          CI_PLUGIN_FOLDERS: ${{ needs.quality_contract.outputs.plugin_folders }}
+          CI_PLUGIN_DEPENDENCIES: ${{ needs.quality_contract.outputs.dependency_folders }}
         run: php Plugins/${PLUGIN_FOLDER}/.github/ci/setup-runtime.php
 
       - name: Install Playwright dependencies
@@ -484,9 +720,17 @@ jobs:
       - name: Start PHP server
         if: steps.e2e-targets.outputs.has_tests == 'true'
         working-directory: facturascripts
+        # Mismo PHP que el runtime de tenant (zz-runtime-prod.ini): JIT apagado y 256M. setup-php
+        # enciende el JIT (1235, 128M) y PHP 8.2 en arm64 da segfault con él (TAREA-647.5). Si el
+        # servidor cae, su estado de salida queda al final del log.
         run: |
-          php -S 127.0.0.1:8765 index.php > "${RUNNER_TEMP}/${PLUGIN_FOLDER}-php-server.log" 2>&1 &
-          echo $! > "${RUNNER_TEMP}/${PLUGIN_FOLDER}-php-server.pid"
+          (
+            php -d memory_limit=256M -d opcache.jit_buffer_size=0 -S 127.0.0.1:8765 index.php &
+            echo $! > "${RUNNER_TEMP}/${PLUGIN_FOLDER}-php-server.pid"
+            status=0
+            wait $! || status=$?
+            echo "PHP server exited with status ${status}"
+          ) > "${RUNNER_TEMP}/${PLUGIN_FOLDER}-php-server.log" 2>&1 &
 
       - name: Wait for application
         if: steps.e2e-targets.outputs.has_tests == 'true'
@@ -507,11 +751,21 @@ jobs:
           BASE_URL: http://127.0.0.1:8765
         run: npx playwright test
 
+      - name: Print PHP server diagnostics
+        if: failure() && steps.e2e-targets.outputs.has_tests == 'true'
+        run: |
+          log_file="${RUNNER_TEMP}/${PLUGIN_FOLDER}-php-server.log"
+          if [ -f "${log_file}" ]; then
+            grep -v -E '\] [0-9.:]+ (Accepted|Closing)$' "${log_file}" | tail -n 100
+          else
+            echo "::warning::PHP server log is unavailable."
+          fi
+
       - name: Upload Playwright artifacts
         if: failure() && steps.e2e-targets.outputs.has_tests == 'true'
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
         with:
-          name: ${{ env.PLUGIN_FOLDER }}-e2e-artifacts
+          name: ${{ env.PLUGIN_FOLDER }}-${{ matrix.facturascripts-ref }}-e2e-artifacts
           path: |
             facturascripts/${{ steps.e2e-targets.outputs.tests_dir }}/playwright-report
             facturascripts/${{ steps.e2e-targets.outputs.tests_dir }}/test-results

@@ -23,6 +23,7 @@ con la plantilla aunque el plugin la llame fijada por SHA.
 - codigo del plugin;
 - `Init.php`, modelos, controladores, vistas, tablas o assets;
 - `README.md`, `CHANGELOG.md` y `facturascripts.ini`;
+- `.beply/ci-dependencies.json`, la lista de plugins que clona la CI del plugin (ver `docs/CI-CD.md`);
 - `Tools/manifest.json` real del plugin;
 - documentacion de usuario real en `docs/user/`;
 - `impact-map`, URLs publicadas y matriz real de cobertura UI;
