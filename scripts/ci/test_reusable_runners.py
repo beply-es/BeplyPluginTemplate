@@ -61,6 +61,7 @@ class ReusableRunnerContractTests(unittest.TestCase):
     def test_duplicate_job_key_and_yaml_alias_fail(self):
         samples = [
             workflow(f"  publish:\n    runs-on: {CLOSED}\n    runs-on: ubuntu-latest\n    steps: []\n"),
+            workflow(f"  publish:\n    runs-on: ubuntu-latest\n    runs-on: {CLOSED}\n    steps: []\n"),
             workflow(f"  publish:\n    runs-on: &r {CLOSED}\n    steps: []\n  other:\n    runs-on: *r\n    steps: []\n"),
         ]
         for text in samples:
