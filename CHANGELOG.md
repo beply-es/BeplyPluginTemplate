@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- El contrato CI comprueba el mismo SHA fijado para release y promocion en los plugins.
+
+- Exigir el proveedor de tools desde la primera tool, pack o runtime tool; los plugins sin tools solo necesitan el manifiesto.
+
+- La CI y los validadores leen los cores de la matriz propia de cada plugin; los impactos `in_preparation` pueden carecer de URL publicada hasta la release.
+
 ## v1.5 - 2026-10-08
 
 - El candidato DEV solo sale en verde si lee de vuelta del catalogo DEV

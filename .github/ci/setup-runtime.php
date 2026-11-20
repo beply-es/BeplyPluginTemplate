@@ -55,14 +55,31 @@ Cache::clear();
 Kernel::init();
 DbUpdater::rebuild();
 
-seedRequestedPlugins();
-persistRequestedPlugins();
-deployRequestedPlugins();
-ensureCoreTables();
-seedCoreCatalogData();
-seedDefaultSettings();
-initializeRequestedPlugins();
-seedDefaultSettings();
+if (requestedDependencyFolders() === []) {
+    seedRequestedPlugins();
+    persistRequestedPlugins();
+    deployRequestedPlugins();
+    ensureCoreTables();
+    seedCoreCatalogData();
+    seedDefaultSettings();
+    initializeRequestedPlugins();
+    seedDefaultSettings();
+} else {
+    // Con otros plugins (.beply/ci-dependencies.json), el core y la empresa van antes, y las
+    // tablas de todos se crean en varias pasadas, porque unas apuntan a las de otro plugin.
+    ensureCoreTables();
+    deployCoreRuntime();
+    seedCoreCompany();
+    seedCoreCatalogData();
+    seedDefaultSettings();
+    seedRequestedPlugins();
+    persistRequestedPlugins();
+    deployRequestedPlugins();
+    ensurePluginBaseTables();
+    initializeRequestedPlugins();
+    seedDefaultSettings();
+    bootstrapFileSystem();
+}
 
 echo 'Enabled plugins: ' . implode(', ', Plugins::enabled()) . PHP_EOL;
 
@@ -83,6 +100,18 @@ function requestedPluginFolders(): array
     }
 
     return $unique;
+}
+
+function requestedDependencyFolders(): array
+{
+    $raw = getenv('CI_PLUGIN_DEPENDENCIES') ?: '';
+    $folders = array_values(array_unique(array_filter(array_map('trim', explode(',', $raw)))));
+    $missing = array_diff($folders, requestedPluginFolders());
+    if ($missing !== []) {
+        throw new RuntimeException('CI dependencies not checked out or not requested: ' . implode(', ', $missing));
+    }
+
+    return $folders;
 }
 
 function bootstrapFileSystem(): void
@@ -197,6 +226,74 @@ function clearDatabaseTableCache(): void
 function deployRequestedPlugins(): void
 {
     Plugins::deploy(true, true);
+}
+
+function deployCoreRuntime(): void
+{
+    Plugins::deploy(true, true);
+}
+
+function seedCoreCompany(): void
+{
+    ensureRequiredDefaultSettings();
+    ensureDefaultCompany();
+}
+
+function ensurePluginBaseTables(): void
+{
+    $pending = [];
+    foreach (requestedPluginFolders() as $folder) {
+        $tableFiles = glob(FS_FOLDER . '/Plugins/' . $folder . '/Table/*.xml') ?: [];
+        sort($tableFiles, SORT_STRING);
+
+        foreach ($tableFiles as $filePath) {
+            $tableName = basename($filePath, '.xml');
+            $pending[$folder . ':' . $tableName] = [
+                'file' => $filePath,
+                'table' => $tableName,
+            ];
+        }
+    }
+
+    $lastErrors = [];
+    $maxPasses = max(3, count($pending));
+    for ($pass = 1; $pass <= $maxPasses && !empty($pending); $pass++) {
+        $createdThisPass = 0;
+        DbUpdater::rebuild();
+        clearDatabaseTableCache();
+
+        foreach ($pending as $key => $table) {
+            try {
+                $structure = DbUpdater::readTableXml($table['file']);
+                if (DbUpdater::createOrUpdateTable($table['table'], $structure)) {
+                    unset($pending[$key], $lastErrors[$key]);
+                    $createdThisPass++;
+                    continue;
+                }
+
+                $lastErrors[$key] = DbUpdater::getLastError();
+            } catch (Throwable $error) {
+                $lastErrors[$key] = $error->getMessage();
+            }
+        }
+
+        clearDatabaseTableCache();
+        if ($createdThisPass === 0) {
+            break;
+        }
+    }
+
+    DbUpdater::rebuild();
+    clearDatabaseTableCache();
+
+    if (!empty($pending)) {
+        $details = [];
+        foreach ($pending as $key => $table) {
+            $details[] = $key . ': ' . ($lastErrors[$key] ?? DbUpdater::getLastError());
+        }
+
+        throw new RuntimeException('Failed to bootstrap plugin tables: ' . implode(' | ', $details));
+    }
 }
 
 function initializeRequestedPlugins(): void

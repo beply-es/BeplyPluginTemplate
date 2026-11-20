@@ -42,12 +42,11 @@ for (const path of [
   'README.md',
   'facturascripts.ini',
   '.beply/facturascripts-matrix.json',
+  'scripts/ci/read-facturascripts-matrix.mjs',
   '.beply/template-lock.json',
   '.beply/template-sync.json',
   'Tools/manifest.json',
   'Tools/README.md',
-  'Lib/BeplyAgentToolProvider.php',
-  'Lib/TemplateToolsManifest.php',
   'docs/CODEX-WORKFLOW.md',
   'docs/TESTING.md',
   'docs/FACTURASCRIPTS-STYLE-GUIDE.md',
@@ -98,7 +97,12 @@ if (!minPhp) {
 
 const matrix = readJson('.beply/facturascripts-matrix.json')
 const supported = Array.isArray(matrix.supported) ? matrix.supported : []
-if (matrix.defaultRef !== 'v2026.3') {
+const requiredRefs = supported.filter((item) => item?.required === true).map((item) => item.ref)
+if (requiredRefs.length === 0) fail('FacturaScripts matrix must require at least one ref')
+if (requiredRefs.some((ref) => typeof ref !== 'string' || !/^v\d{4}\.\d{1,3}$/.test(ref))) fail('FacturaScripts required refs must use vYYYY.N format')
+if (new Set(requiredRefs).size !== requiredRefs.length) fail('FacturaScripts required refs must be unique')
+if (!requiredRefs.includes(matrix.defaultRef)) fail('FacturaScripts defaultRef must be required')
+if (isTemplate && matrix.defaultRef !== 'v2026.3') {
   fail('FacturaScripts defaultRef must be v2026.3 until the matrix is intentionally updated')
 }
 
@@ -141,9 +145,16 @@ for (const adapter of ['.github/workflows/release.yml', '.github/workflows/promo
     fail(`template-sync must create missing release adapter ${adapter}`)
   }
 }
-for (const ref of ['v2026.3', 'v2026.2']) {
-  if (!supported.some((item) => item.ref === ref && item.required === true)) {
-    fail(`FacturaScripts matrix must require ${ref}`)
+if (isTemplate) {
+  for (const workflow of ['.github/workflows/reusable-immutable-plugin-candidate.yml', '.github/workflows/reusable-promote-immutable-plugin-candidate.yml']) {
+    if (!(templateSync.overwrite || []).includes(workflow)) {
+      fail(`template-sync must overwrite reusable workflow ${workflow}`)
+    }
+  }
+  for (const ref of ['v2026.3', 'v2026.2']) {
+    if (!requiredRefs.includes(ref)) {
+      fail(`FacturaScripts matrix must require ${ref}`)
+    }
   }
 }
 
@@ -157,7 +168,25 @@ if (toolsManifest.plugin?.name !== ini.name) {
 if (toolsManifest.executionPolicy?.humanReviewRequired !== true) {
   fail('Tools execution policy must require human review by default')
 }
-for (const tool of toolsManifest.runtimeTools || []) {
+const toolListKeys = ['tools', 'toolPacks', 'runtimeTools']
+for (const key of toolListKeys) {
+  const value = toolsManifest[key]
+  if (value !== undefined && value !== null && !Array.isArray(value)) {
+    fail(`Tools/manifest.json ${key} must be an array`)
+  }
+}
+const declaresTools = toolListKeys.some((key) => {
+  const value = toolsManifest[key]
+  if (Array.isArray(value)) return value.length > 0
+  return value !== undefined && value !== null && typeof value === 'object' && Object.keys(value).length > 0
+})
+if (isTemplate || declaresTools) {
+  requireFile('Lib/BeplyAgentToolProvider.php')
+}
+if (isTemplate) {
+  requireFile('Lib/TemplateToolsManifest.php')
+}
+for (const tool of (Array.isArray(toolsManifest.runtimeTools) ? toolsManifest.runtimeTools : [])) {
   if (!tool.name || !tool.toolType || !tool.parameters) {
     fail(`Runtime tool is missing name/toolType/parameters: ${JSON.stringify(tool)}`)
   }

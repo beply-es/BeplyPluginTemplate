@@ -26,8 +26,11 @@ const isTemplate = /^name\s*=\s*["']?BeplyPluginTemplate["']?\s*$/m.test(ini)
 
 check(tests.includes('validate-template-contract.mjs'), 'Tests workflow must run validate-template-contract.mjs')
 check(tests.includes('validate-docs-impact.mjs'), 'Tests workflow must run validate-docs-impact.mjs')
-check(tests.includes('v2026.3'), 'Tests workflow must include FacturaScripts v2026.3')
-check(tests.includes('v2026.2'), 'Tests workflow must include FacturaScripts v2026.2')
+check(tests.includes('read-facturascripts-matrix.mjs'), 'Tests workflow must read .beply/facturascripts-matrix.json')
+const refMentions = (tests.match(/facturascripts-ref["']?\s*:/g) || []).length
+const refLines = tests.split(/\r?\n/).filter((line) => line.trim() === 'facturascripts-ref: ${{ fromJSON(needs.quality_contract.outputs.fs_refs) }}')
+check(refLines.length === 4, 'Tests workflow must define exactly four facturascripts-ref matrices taken from the matrix file')
+check(refMentions === 4, 'Tests workflow must not define facturascripts-ref anywhere else')
 check(!/has_tests=false/.test(tests), 'Tests workflow must not silently skip required suites')
 
 check(release.includes('Verify Tests Workflow'), 'Release workflow must wait for Tests')

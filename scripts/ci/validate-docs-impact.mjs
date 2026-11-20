@@ -103,7 +103,7 @@ for (const impact of impacts) {
   if (!Array.isArray(impact.tests) || impact.tests.length === 0) {
     fail(`Docs impact ${impact.id} must link tests`)
   }
-  if (!pages.some((page) => page.id === impact.id && page.publishedUrl)) {
+  if ((requireAi || impact.status !== 'in_preparation') && !pages.some((page) => page.id === impact.id && page.publishedUrl)) {
     fail(`Docs impact ${impact.id} has no published page URL`)
   }
 }

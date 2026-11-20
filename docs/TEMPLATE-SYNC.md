@@ -15,11 +15,15 @@ Solo tooling comun y contratos de trabajo:
 - `AGENTS.md`;
 - boilerplate legal o referencias solo si todavia no existen.
 
+Los dos workflows reutilizables se sincronizan para que el contrato local coincida
+con la plantilla aunque el plugin la llame fijada por SHA.
+
 ## Que no se sincroniza automaticamente
 
 - codigo del plugin;
 - `Init.php`, modelos, controladores, vistas, tablas o assets;
 - `README.md`, `CHANGELOG.md` y `facturascripts.ini`;
+- `.beply/ci-dependencies.json`, la lista de plugins que clona la CI del plugin (ver `docs/CI-CD.md`);
 - `Tools/manifest.json` real del plugin;
 - documentacion de usuario real en `docs/user/`;
 - `impact-map`, URLs publicadas y matriz real de cobertura UI;
@@ -47,7 +51,11 @@ node scripts/template/sync-template.mjs --template-root /ruta/BeplyPluginTemplat
 ```
 
 El script falla si el repo tiene cambios sin commit, salvo que se use
-`--allow-dirty`. Despues de aplicar, revisar diff y ejecutar tests.
+`--allow-dirty`. La fuente de plantilla debe ser un checkout Git limpio, sin
+archivos ignorados, y su
+commit se registra en `commit` y `sha`; un SHA completo suministrado con `--ref`
+debe coincidir con ese commit. `--allow-dirty` no permite una fuente de plantilla
+sucia. Despues de aplicar, revisar diff y ejecutar tests.
 
 ## Migracion del contrato inmutable
 
