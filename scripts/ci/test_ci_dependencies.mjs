@@ -20,7 +20,7 @@ const NO_DEPENDENCIES = [
   ]),
 ].join('\n') + '\n'
 
-function run(content, { plugin = 'BeplyDemo' } = {}) {
+function run(content, { plugin = 'BeplyDemo', repo = null, actions = null } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ci-deps-'))
   try {
     if (content !== undefined) {
@@ -29,7 +29,11 @@ function run(content, { plugin = 'BeplyDemo' } = {}) {
     }
     const env = { ...process.env }
     delete env.PLUGIN_FOLDER
+    delete env.GITHUB_REPOSITORY
+    delete env.GITHUB_ACTIONS
     if (plugin !== null) env.PLUGIN_FOLDER = plugin
+    if (repo !== null) env.GITHUB_REPOSITORY = repo
+    if (actions !== null) env.GITHUB_ACTIONS = actions
     return spawnSync(process.execPath, [script], { cwd: dir, env, encoding: 'utf8' })
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -115,6 +119,33 @@ test('solo repositorios de beply-es', () => {
   rejects({ schema: 1, plugins: [dep({ repository: 'beply-es/../otro' })] }, /repository/)
   rejects({ schema: 1, plugins: [dep({ repository: 'beply-es/A\nB' })] }, /repository/)
   rejects({ schema: 1, plugins: [dep({ repository: 'beply-es/BeplyDemo' })] }, /propio plugin/)
+})
+
+test('nunca el propio repo: sin distinguir mayúsculas y aunque su nombre no sea el de la carpeta', () => {
+  // GitHub resuelve los nombres de repositorio sin distinguir mayúsculas: beply-es/beplydemo es el propio.
+  rejects({ schema: 1, plugins: [dep({ repository: 'beply-es/beplydemo' })] }, /propio plugin/)
+  rejects({ schema: 1, plugins: [dep({ repository: 'BEPLY-ES/BeplyDemo' })] }, /repository|propio plugin/)
+  // El repo de la carpeta MaisonsIntegration se llama «maisons»: se compara también con GITHUB_REPOSITORY.
+  rejects({ schema: 1, plugins: [dep({ repository: 'beply-es/Maisons', folder: 'Otro' })] }, /propio plugin/,
+    { plugin: 'MaisonsIntegration', repo: 'beply-es/maisons' })
+  const bien = run({ schema: 1, plugins: [dep()] }, { plugin: 'MaisonsIntegration', repo: 'beply-es/maisons' })
+  assert.equal(bien.status, 0, bien.stderr)
+  // En GitHub Actions, GITHUB_REPOSITORY es obligatorio: sin él no se puede descartar el propio repo.
+  rejects({ schema: 1, plugins: [dep()] }, /GITHUB_REPOSITORY/, { actions: 'true' })
+  // GITHUB_REPOSITORY con mayúsculas mezcladas y la entrada en minúsculas: también es el propio.
+  rejects({ schema: 1, plugins: [dep({ repository: 'beply-es/maisonsrepo', folder: 'Otro' })] }, /propio plugin/,
+    { plugin: 'MaisonsIntegration', repo: 'beply-es/MaisonsRepo' })
+  // Por HTTPS, beply-es/<repo>.git es el mismo repo (medido con ls-remote): se quita el .git antes de comparar.
+  for (const repository of ['beply-es/maisons.git', 'beply-es/maisons.GIT', 'beply-es/Maisons.Git']) {
+    rejects({ schema: 1, plugins: [dep({ repository, folder: 'Otro' })] }, /propio plugin/,
+      { plugin: 'MaisonsIntegration', repo: 'beply-es/maisons' })
+  }
+  rejects({ schema: 1, plugins: [dep({ repository: 'beply-es/BeplyDemo.git', folder: 'Otro' })] }, /propio plugin/)
+  rejects({ schema: 1, plugins: [dep(), dep({ repository: 'beply-es/BeplyProyectos.git', folder: 'Otro' })] },
+    /repository repetido/)
+  // Dos entradas que solo se distinguen en mayúsculas son el mismo repositorio.
+  rejects({ schema: 1, plugins: [dep(), dep({ repository: 'beply-es/beplyproyectos', folder: 'Otro' })] },
+    /repository repetido/)
 })
 
 test('la referencia es un commit exacto de 40 hex, nunca una rama ni un tag', () => {
