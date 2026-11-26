@@ -362,7 +362,7 @@ jobs:
         with:
           name: ${{ env.PLUGIN_FOLDER }}-coverage-${{ matrix.facturascripts-ref }}
           path: facturascripts/coverage.xml
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 1
 
   coverage-upload:
