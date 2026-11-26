@@ -92,6 +92,7 @@ jobs:
           "${RUNNER_TEMP}/contract-venv/bin/python" -m unittest scripts.ci.test_template_pin_contract
           "${RUNNER_TEMP}/contract-venv/bin/python" -m unittest scripts.ci.test_ci_dependencies_workflow
           "${RUNNER_TEMP}/contract-venv/bin/python" -m unittest scripts.ci.test_tests_secrets_isolation
+          "${RUNNER_TEMP}/contract-venv/bin/python" -m unittest scripts.ci.test_reusable_release_tag_gate
 
       - name: Unit test one Tests run per SHA and draft PR gating
         run: python3 .github/ci/test_tests_workflow_triggers.py

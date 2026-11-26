@@ -1,0 +1,177 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  # Test-only key, generated for CI; never used outside this workflow.
+  MARKETPLACE_ENCRYPTION_KEY: "w1Fq3iPc9yK0bTqR8nLx2sVd5hJm7aEo4uZgYxCkB6M="
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mirakl-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  guardrails:
+    if: github.event.pull_request.draft != true
+    name: Guardrails
+    timeout-minutes: 10
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+    steps:
+      - name: Checkout plugin
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Setup PHP
+        uses: shivammathur/setup-php@accd6127cb78bee3e8082180cb391013d204ef9f # 2.37.0
+        with:
+          php-version: '8.2'
+          extensions: mbstring, intl, simplexml, json
+          coverage: none
+      - name: Whitespace diff check
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: git diff --check "$BASE_SHA...HEAD"
+      - name: Manifest version has exactly one decimal
+        run: grep -Eq "^version = [0-9]+\.[0-9]$" facturascripts.ini
+      - name: PHP syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          find . -path ./.git -prune -o -name '*.php' -print0 | xargs -0 -n1 php -l > /dev/null
+      - name: XML parses and table files are lowercase
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in $(find Table XMLView -name '*.xml' 2>/dev/null); do
+            php -r 'exit(simplexml_load_file($argv[1]) === false ? 1 : 0);' "$f" || { echo "::error file=$f::invalid XML"; exit 1; }
+          done
+          for f in $(find Table -name '*.xml' 2>/dev/null); do
+            base=$(basename "$f")
+            [ "$base" = "$(echo "$base" | tr '[:upper:]' '[:lower:]')" ] || { echo "::error file=$f::table file must be lowercase"; exit 1; }
+          done
+      - name: Translations are valid JSON
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in Translation/*.json; do php -r 'json_decode(file_get_contents($argv[1]), true, 512, JSON_THROW_ON_ERROR);' "$f"; done
+      - name: Release workflow security and contract tests
+        run: python3 .github/ci/test_release_workflows.py
+
+  tests:
+    if: github.event.pull_request.draft != true
+    needs: guardrails
+    name: ${{ matrix.suite }} / Core ${{ matrix.core }} / MC ${{ matrix.mc }} / PHP ${{ matrix.php }}
+    timeout-minutes: 25
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [unit, runtime]
+        core: ['2025.71', '2026.72']
+        # 22.3 is the floor (the version Osmosis runs, measured 26-11); 22.4 is the latest release.
+        mc: ['22.3', '22.4']
+        php: ['8.2']
+        include:
+          - core: '2025.71'
+            sha: b4f2422e4a3f5931c7188214fb8e2196b80182b5
+          - core: '2026.72'
+            sha: e38f65a60e46bd2aba6bf5e3c4e3e1ad8c4444cc
+          - mc: '22.3'
+            mc_sha: e9936c87cc4297625a727a8be3825045d49341a1
+          - mc: '22.4'
+            mc_sha: 1ab4c3ac79fcbdb4f0d338a30b28b788a2f12a6a
+          # PHP 8.4: compatibilidad hacia delante (revisión de #3, R4), solo unit.
+          - suite: unit
+            core: '2025.71'
+            sha: b4f2422e4a3f5931c7188214fb8e2196b80182b5
+            mc: '22.4'
+            mc_sha: 1ab4c3ac79fcbdb4f0d338a30b28b788a2f12a6a
+            php: '8.4'
+    steps:
+      - name: Checkout exact FacturaScripts core
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: NeoRazorX/facturascripts
+          ref: ${{ matrix.sha }}
+          path: facturascripts
+          persist-credentials: false
+      - name: Verify exact core source
+        run: test "$(git -C facturascripts rev-parse HEAD)" = "${{ matrix.sha }}"
+      - name: Checkout plugin
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          path: facturascripts/Plugins/MiraklIntegration
+          persist-credentials: false
+      - name: Checkout MarketplaceCore
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: beply-es/MarketplaceCore
+          ref: ${{ matrix.mc_sha }}
+          path: facturascripts/Plugins/MarketplaceCore
+          ssh-key: ${{ secrets.MARKETPLACECORE_DEPLOY_KEY }}
+          persist-credentials: false
+      - name: Verify exact MarketplaceCore source
+        run: test "$(git -C facturascripts/Plugins/MarketplaceCore rev-parse HEAD)" = "${{ matrix.mc_sha }}"
+      - name: Setup PHP
+        uses: shivammathur/setup-php@accd6127cb78bee3e8082180cb391013d204ef9f # 2.37.0
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: bcmath, curl, dom, fileinfo, gd, intl, mbstring, pgsql, pdo_pgsql, simplexml, zip
+          coverage: none
+          tools: composer:2
+      - name: Install core dependencies
+        working-directory: facturascripts
+        run: |
+          composer config platform.php "$(php -r 'echo PHP_VERSION;')"
+          composer install --no-interaction --prefer-dist --no-progress --no-scripts
+      - name: Start local PostgreSQL
+        if: matrix.suite == 'runtime'
+        working-directory: facturascripts
+        run: bash Plugins/MiraklIntegration/.github/ci/start-local-postgres.sh
+      - name: Write runtime config
+        if: matrix.suite == 'runtime'
+        working-directory: facturascripts
+        run: |
+          mkdir -p MyFiles/Cache
+          cat > config.php << 'EOF'
+          <?php
+          define('FS_COOKIES_EXPIRE', 31536000);
+          define('FS_ROUTE', '');
+          define('FS_DB_TYPE', 'postgresql');
+          define('FS_DB_HOST', '127.0.0.1');
+          define('FS_DB_PORT', 5432);
+          define('FS_DB_NAME', 'facturascripts');
+          define('FS_DB_USER', 'postgres');
+          define('FS_DB_PASS', 'mypassword');
+          define('FS_DB_FOREIGN_KEYS', true);
+          define('FS_DB_TYPE_CHECK', true);
+          define('FS_PGSQL_SSL', false);
+          define('FS_PGSQL_ENDPOINT', false);
+          define('FS_LANG', 'es_ES');
+          define('FS_TIMEZONE', 'Europe/Madrid');
+          define('FS_HIDDEN_PLUGINS', '');
+          define('FS_DEBUG', false);
+          define('FS_DISABLE_ADD_PLUGINS', false);
+          define('FS_DISABLE_RM_PLUGINS', false);
+          EOF
+      - name: Run PHPUnit ${{ matrix.suite }} suite
+        working-directory: facturascripts
+        env:
+          FS_FOLDER: ${{ github.workspace }}/facturascripts
+          BEPLY_TENANT_ENCRYPTION_KEY: ${{ env.MARKETPLACE_ENCRYPTION_KEY }}
+        run: |
+          php -d memory_limit=768M vendor/bin/phpunit \
+            -c Plugins/MiraklIntegration/phpunit.${{ matrix.suite }}.xml.dist \
+            --fail-on-skipped --fail-on-incomplete --do-not-cache-result --testdox
