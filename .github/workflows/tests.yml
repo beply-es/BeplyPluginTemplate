@@ -357,10 +357,10 @@ jobs:
             --coverage-text
 
       - name: Upload coverage artifact
-        if: steps.unit-targets.outputs.has_tests == 'true' && matrix.php-version == '8.2'
+        if: steps.unit-targets.outputs.has_tests == 'true' && matrix.php-version == '8.2' && matrix.facturascripts-ref == fromJSON(needs.quality_contract.outputs.fs_refs)[0]
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ${{ env.PLUGIN_FOLDER }}-coverage-${{ matrix.facturascripts-ref }}
+          name: ${{ env.PLUGIN_FOLDER }}-coverage
           path: facturascripts/coverage.xml
           if-no-files-found: warn
           retention-days: 1
@@ -377,7 +377,7 @@ jobs:
       - name: Download coverage artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          pattern: ${{ env.PLUGIN_FOLDER }}-coverage-*
+          pattern: ${{ env.PLUGIN_FOLDER }}-coverage
           path: coverage-artifacts
           merge-multiple: true
 

@@ -38,9 +38,14 @@ WORKFLOW = WORKFLOWS_DIR / "tests.yml"
 TEMPLATE_SYNC = ROOT / ".beply/template-sync.json"
 
 SHA40_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}$")
-ANY_SECRET_RE = re.compile(r"\bsecrets\s*(?:\.[A-Za-z0-9_]+|\[)", re.IGNORECASE)
+ANY_SECRET_RE = re.compile(r"\bsecrets\b", re.IGNORECASE)
+EXPR_RE = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
 GITHUB_TOKEN_RE = re.compile(
     r"\bgithub\s*(?:\.\s*token\b|\[\s*['\"]token['\"]\s*\])",
+    re.IGNORECASE,
+)
+GITHUB_WHOLE_OBJECT_RE = re.compile(
+    r"\bgithub\b(?!\s*\.\s*[A-Za-z_][A-Za-z0-9_-]*)",
     re.IGNORECASE,
 )
 ALLOWED_DEP_KEY_CHECK_STEP = "Check CI dependency keys"
@@ -90,14 +95,23 @@ def action_slug(uses: str) -> str:
     return uses.split("@", 1)[0].strip()
 
 
+def _has_disallowed_github_ref(value: str) -> bool:
+    if GITHUB_TOKEN_RE.search(value):
+        return True
+    for expr in EXPR_RE.findall(value):
+        if GITHUB_WHOLE_OBJECT_RE.search(expr):
+            return True
+    return False
+
+
 def find_test_jobs_secret_violations(workflow: dict) -> list[str]:
-    """Devuelve todas las referencias prohibidas a secrets/github.token en workflow y jobs de pruebas."""
+    """Devuelve todas las referencias prohibidas a secrets o github.token/github entero en workflow y jobs de pruebas."""
     violations: list[str] = []
     for key, value in iter_env_values(workflow.get("env")):
         if ANY_SECRET_RE.search(value):
             violations.append(f"workflow.env.{key} references a secret: {value}")
-        if GITHUB_TOKEN_RE.search(value):
-            violations.append(f"workflow.env.{key} references github.token: {value}")
+        if _has_disallowed_github_ref(value):
+            violations.append(f"workflow.env.{key} references github.token or whole github context: {value}")
 
     jobs = workflow.get("jobs") or {}
     for job_name, job in jobs.items():
@@ -106,16 +120,16 @@ def find_test_jobs_secret_violations(workflow: dict) -> list[str]:
         for key, value in iter_env_values(job.get("env")):
             if ANY_SECRET_RE.search(value):
                 violations.append(f"{job_name}.env.{key} must not reference secrets: {value}")
-            if GITHUB_TOKEN_RE.search(value):
-                violations.append(f"{job_name}.env.{key} must not reference github.token: {value}")
+            if _has_disallowed_github_ref(value):
+                violations.append(f"{job_name}.env.{key} must not reference github.token or whole github context: {value}")
         for idx, step in enumerate(job.get("steps") or []):
             step_name = str(step.get("name", ""))
             step_label = step_name or f"step[{idx}]"
             slug = action_slug(str(step.get("uses", "")))
 
             for key, value in iter_env_values(step.get("env")):
-                if GITHUB_TOKEN_RE.search(value):
-                    violations.append(f"{job_name} / {step_label} env.{key} must not reference github.token")
+                if _has_disallowed_github_ref(value):
+                    violations.append(f"{job_name} / {step_label} env.{key} must not reference github.token or whole github context")
                 if ANY_SECRET_RE.search(value):
                     is_allowed_check = (
                         step_name == ALLOWED_DEP_KEY_CHECK_STEP
@@ -129,12 +143,12 @@ def find_test_jobs_secret_violations(workflow: dict) -> list[str]:
             run_cmd = str(step.get("run", ""))
             if ANY_SECRET_RE.search(run_cmd):
                 violations.append(f"{job_name} / {step_label} run must not reference secrets")
-            if GITHUB_TOKEN_RE.search(run_cmd):
-                violations.append(f"{job_name} / {step_label} run must not reference github.token")
+            if _has_disallowed_github_ref(run_cmd):
+                violations.append(f"{job_name} / {step_label} run must not reference github.token or whole github context")
 
             for key, value in iter_env_values(step.get("with")):
-                if GITHUB_TOKEN_RE.search(value):
-                    violations.append(f"{job_name} / {step_label} with.{key} must not reference github.token")
+                if _has_disallowed_github_ref(value):
+                    violations.append(f"{job_name} / {step_label} with.{key} must not reference github.token or whole github context")
                 if ANY_SECRET_RE.search(value):
                     is_allowed_ssh_key = (
                         slug == "actions/checkout"
@@ -195,6 +209,60 @@ class TestsSecretsIsolationContractTests(unittest.TestCase):
                     violations,
                     f"Mutant {case_name} must be rejected by secret isolation contract",
                 )
+
+    def test_contract_rejects_whole_secrets_and_whole_github_mutants(self):
+        cases = [
+            ("step_env_tojson_secrets", lambda wf: wf["jobs"]["unit"]["steps"][0].setdefault("env", {}).__setitem__("LEAK", "${{ toJSON(secrets) }}")),
+            ("step_run_tojson_secrets", lambda wf: wf["jobs"]["unit"]["steps"][-1].__setitem__("run", "echo '${{ toJSON(secrets) }}'")),
+            ("step_env_bare_secrets", lambda wf: wf["jobs"]["unit"]["steps"][0].setdefault("env", {}).__setitem__("LEAK", "${{ secrets }}")),
+            ("step_env_tojson_github", lambda wf: wf["jobs"]["unit"]["steps"][0].setdefault("env", {}).__setitem__("LEAK", "${{ toJSON(github) }}")),
+            ("step_run_tojson_github", lambda wf: wf["jobs"]["unit"]["steps"][-1].__setitem__("run", "echo '${{ toJSON(github) }}'")),
+            ("step_env_format_github", lambda wf: wf["jobs"]["unit"]["steps"][0].setdefault("env", {}).__setitem__("LEAK", "${{ format('{0}', github) }}")),
+            ("step_env_bare_github", lambda wf: wf["jobs"]["unit"]["steps"][0].setdefault("env", {}).__setitem__("LEAK", "${{ github }}")),
+            ("step_run_bare_github", lambda wf: wf["jobs"]["unit"]["steps"][-1].__setitem__("run", "echo '${{ github }}'")),
+            ("workflow_env_tojson_github", lambda wf: wf.setdefault("env", {}).__setitem__("LEAK", "${{ toJSON(github) }}")),
+            ("job_env_tojson_secrets", lambda wf: wf["jobs"]["unit"].setdefault("env", {}).__setitem__("LEAK", "${{ toJSON(secrets) }}")),
+            ("step_with_tojson_github", lambda wf: wf["jobs"]["unit"]["steps"][0]["with"].__setitem__("ref", "${{ toJSON(github) }}")),
+        ]
+        for case_name, mutate in cases:
+            with self.subTest(mutant=case_name):
+                mutated = copy.deepcopy(self.workflow)
+                mutate(mutated)
+                violations = find_test_jobs_secret_violations(mutated)
+                self.assertTrue(
+                    violations,
+                    f"Mutant {case_name} must be rejected by secret isolation contract",
+                )
+
+    def test_unit_uploads_single_non_colliding_coverage_artifact(self):
+        unit_steps = self.jobs["unit"]["steps"]
+        upload_steps = [
+            step for step in unit_steps
+            if action_slug(str(step.get("uses", ""))) == "actions/upload-artifact"
+        ]
+        self.assertEqual(len(upload_steps), 1, "unit must have exactly one coverage upload-artifact step")
+        upload = upload_steps[0]
+        self.assertEqual(
+            (upload.get("with") or {}).get("name"),
+            "${{ env.PLUGIN_FOLDER }}-coverage",
+            "unit must upload a single non-colliding coverage artifact name without matrix suffix",
+        )
+        self.assertIn(
+            "fromJSON(needs.quality_contract.outputs.fs_refs)[0]",
+            str(upload.get("if", "")),
+            "unit coverage upload must be gated to a single matrix leg so coverage.xml never collides",
+        )
+        download_steps = [
+            step for step in self.jobs["coverage-upload"]["steps"]
+            if action_slug(str(step.get("uses", ""))) == "actions/download-artifact"
+        ]
+        self.assertEqual(len(download_steps), 1)
+        dl_with = download_steps[0].get("with") or {}
+        self.assertEqual(
+            dl_with.get("pattern"),
+            "${{ env.PLUGIN_FOLDER }}-coverage",
+            "coverage-upload download-artifact must match the single exact artifact without wildcard collision",
+        )
 
     def test_test_jobs_only_use_allowed_non_caching_actions_and_disable_persist_credentials(self):
         for job_name, job in self.jobs.items():
