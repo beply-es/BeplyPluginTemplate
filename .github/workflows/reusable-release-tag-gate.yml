@@ -1,0 +1,312 @@
+name: Reusable Release Tag Gate
+
+on:
+  workflow_call:
+    inputs:
+      expected_repo:
+        description: Exact owner/repo allowed to pass this release gate (must match github.repository)
+        required: true
+        type: string
+      expected_jobs:
+        description: JSON array of exact required job names in the Tests workflow
+        required: true
+        type: string
+      optional_jobs:
+        description: Optional JSON array of advisory (continue-on-error) job names allowed in the Tests workflow
+        required: false
+        default: '[]'
+        type: string
+      tests_workflow_file:
+        description: Workflow filename under .github/workflows/ to verify
+        required: false
+        default: tests.yml
+        type: string
+      timeout_minutes:
+        description: Maximum minutes to wait for the exact Tests push run (1-50)
+        required: false
+        default: 49
+        type: number
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  verify_tests:
+    name: Verify Tests Workflow
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 50
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
+    steps:
+      - name: Wait for exact Tests workflow
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TARGET_SHA: ${{ github.sha }}
+          TARGET_REF: ${{ github.ref }}
+          TARGET_REF_NAME: ${{ github.ref_name }}
+          TARGET_REF_TYPE: ${{ github.ref_type }}
+          TARGET_EVENT: ${{ github.event_name }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+          EXPECTED_REPO: ${{ inputs.expected_repo }}
+          EXPECTED_JOBS_JSON: ${{ inputs.expected_jobs }}
+          OPTIONAL_JOBS_JSON: ${{ inputs.optional_jobs }}
+          TESTS_WORKFLOW_FILE: ${{ inputs.tests_workflow_file }}
+          TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          import re
+          import sys
+          import time
+          import urllib.error
+          import urllib.request
+
+          REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+          WORKFLOW_FILE_RE = re.compile(r"^[A-Za-z0-9_.-]+\.ya?ml$")
+          TAG_RE = re.compile(r"^v(0|[1-9][0-9]*)\.[0-9]$")
+          SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+          class _NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  raise urllib.error.HTTPError(
+                      req.full_url if req else "",
+                      code,
+                      "redirect refused",
+                      headers,
+                      fp,
+                  )
+
+
+          def _make_get_json(token: str):
+              opener = urllib.request.build_opener(_NoRedirect())
+
+              def get_json(endpoint: str) -> dict:
+                  request = urllib.request.Request(
+                      endpoint,
+                      headers={
+                          "Authorization": f"Bearer {token}",
+                          "Accept": "application/vnd.github+json",
+                          "User-Agent": "beply-reusable-release-tag-gate",
+                      },
+                  )
+                  with opener.open(request, timeout=30) as response:
+                      return json.load(response)
+
+              return get_json
+
+
+          def _parse_job_list(raw: str, label: str, *, allow_empty: bool) -> frozenset[str]:
+              try:
+                  parsed = json.loads(raw)
+              except json.JSONDecodeError as exc:
+                  raise ValueError(f"Invalid {label} JSON: {exc}") from exc
+              if not isinstance(parsed, list):
+                  raise ValueError(f"{label} must be a JSON array")
+              if not allow_empty and not parsed:
+                  raise ValueError(f"{label} must not be empty")
+              names: list[str] = []
+              for item in parsed:
+                  if not isinstance(item, str) or not item.strip():
+                      raise ValueError(f"{label} must contain only non-empty strings")
+                  names.append(item)
+              unique = frozenset(names)
+              if len(unique) != len(names):
+                  raise ValueError(f"{label} must not contain duplicate job names")
+              return unique
+
+
+          def _resolve_tag_commit_sha(repository: str, tag_name: str, get_json) -> str:
+              ref_url = f"https://api.github.com/repos/{repository}/git/ref/tags/{tag_name}"
+              ref_payload = get_json(ref_url)
+              if ref_payload.get("ref") != f"refs/tags/{tag_name}":
+                  raise ValueError(f"Unexpected tag ref payload: {ref_payload.get('ref')!r}")
+              obj = ref_payload.get("object") or {}
+              obj_type = obj.get("type")
+              obj_sha = obj.get("sha", "")
+              if obj_type == "commit":
+                  return obj_sha
+              if obj_type == "tag" and SHA40_RE.fullmatch(obj_sha):
+                  tag_payload = get_json(f"https://api.github.com/repos/{repository}/git/tags/{obj_sha}")
+                  inner = tag_payload.get("object") or {}
+                  if inner.get("type") == "commit":
+                      return inner.get("sha", "")
+              raise ValueError(f"Tag {tag_name} does not peel to a commit")
+
+
+          def _branch_exists(repository: str, ref_name: str, get_json) -> bool:
+              head_url = f"https://api.github.com/repos/{repository}/git/ref/heads/{ref_name}"
+              try:
+                  payload = get_json(head_url)
+              except urllib.error.HTTPError as exc:
+                  if exc.code == 404:
+                      return False
+                  raise
+              if not isinstance(payload, dict):
+                  raise ValueError(f"Unexpected branch ref payload type for {ref_name}: {type(payload).__name__}")
+              if payload.get("ref") == f"refs/heads/{ref_name}":
+                  return True
+              raise ValueError(f"Unexpected branch ref payload for {ref_name}: {payload.get('ref')!r}")
+
+
+          def _jobs_complete_and_green(
+              result: dict,
+              expected_jobs: frozenset[str],
+              optional_jobs: frozenset[str] = frozenset(),
+          ) -> bool:
+              jobs = result.get("jobs", [])
+              allowed_jobs = expected_jobs | optional_jobs
+              if result.get("total_count") != len(jobs) or len(jobs) != len(allowed_jobs):
+                  return False
+              names = [job.get("name") for job in jobs]
+              if len(set(names)) != len(names) or set(names) != allowed_jobs:
+                  return False
+              for job in jobs:
+                  if job.get("status") != "completed":
+                      return False
+                  if job.get("name") in expected_jobs and job.get("conclusion") != "success":
+                      return False
+              return True
+
+
+          def verify_release_tests(
+              env: dict[str, str],
+              *,
+              get_json=None,
+              sleep=time.sleep,
+              timeout_seconds: int | None = None,
+              poll_interval: int = 15,
+              max_polls: int | None = None,
+          ) -> tuple[bool, str]:
+              expected_repo = env.get("EXPECTED_REPO", "")
+              repository = env.get("REPOSITORY", "")
+              target_sha = env.get("TARGET_SHA", "")
+              target_ref = env.get("TARGET_REF", "")
+              target_ref_name = env.get("TARGET_REF_NAME", "")
+              target_ref_type = env.get("TARGET_REF_TYPE", "")
+              target_event = env.get("TARGET_EVENT", "")
+              tests_workflow_file = env.get("TESTS_WORKFLOW_FILE", "tests.yml")
+              token = env.get("GITHUB_TOKEN", "")
+
+              if not REPO_RE.fullmatch(expected_repo):
+                  return False, f"Invalid EXPECTED_REPO: {expected_repo!r}"
+              if repository != expected_repo:
+                  return False, f"Unexpected repository: {repository!r} (expected {expected_repo!r})"
+              if not WORKFLOW_FILE_RE.fullmatch(tests_workflow_file):
+                  return False, f"Invalid TESTS_WORKFLOW_FILE: {tests_workflow_file!r}"
+              try:
+                  expected_jobs = _parse_job_list(
+                      env.get("EXPECTED_JOBS_JSON", ""),
+                      "EXPECTED_JOBS_JSON",
+                      allow_empty=False,
+                  )
+                  optional_jobs = _parse_job_list(
+                      env.get("OPTIONAL_JOBS_JSON", "[]") or "[]",
+                      "OPTIONAL_JOBS_JSON",
+                      allow_empty=True,
+                  )
+              except ValueError as exc:
+                  return False, str(exc)
+              if expected_jobs & optional_jobs:
+                  return False, "EXPECTED_JOBS_JSON and OPTIONAL_JOBS_JSON must be disjoint"
+
+              try:
+                  current_run_id = int(env.get("CURRENT_RUN_ID", "0"))
+              except ValueError:
+                  return False, "Invalid CURRENT_RUN_ID"
+              if current_run_id <= 0:
+                  return False, "CURRENT_RUN_ID must be a positive integer"
+
+              if timeout_seconds is None:
+                  try:
+                      timeout_minutes = int(float(env.get("TIMEOUT_MINUTES", "49")))
+                  except ValueError:
+                      return False, "Invalid TIMEOUT_MINUTES"
+                  if not (1 <= timeout_minutes <= 50):
+                      return False, f"TIMEOUT_MINUTES must be between 1 and 50, got {timeout_minutes}"
+                  timeout_seconds = timeout_minutes * 60
+
+              if not SHA40_RE.fullmatch(target_sha):
+                  return False, "TARGET_SHA must be 40 lowercase hex characters"
+              if not TAG_RE.fullmatch(target_ref_name):
+                  return False, f"TARGET_REF_NAME {target_ref_name!r} does not match v<major>.<minor>"
+              if target_ref_type != "tag":
+                  return False, f"Refusing non-tag ref type: {target_ref_type!r}"
+              if target_ref != f"refs/tags/{target_ref_name}":
+                  return False, f"TARGET_REF {target_ref!r} must equal refs/tags/{target_ref_name}"
+              if target_event not in {"push", "workflow_dispatch"}:
+                  return False, f"Unsupported event: {target_event!r}"
+              if not token:
+                  return False, "Missing GITHUB_TOKEN"
+
+              fetch = get_json or _make_get_json(token)
+
+              try:
+                  peeled_sha = _resolve_tag_commit_sha(repository, target_ref_name, fetch)
+              except Exception as exc:
+                  return False, f"Failed to resolve tag refs/tags/{target_ref_name}: {exc}"
+
+              if peeled_sha != target_sha:
+                  return False, f"Tag refs/tags/{target_ref_name} peels to SHA {peeled_sha}, expected {target_sha}"
+
+              try:
+                  if _branch_exists(repository, target_ref_name, fetch):
+                      return False, f"Colliding branch refs/heads/{target_ref_name} exists; refusing ambiguous tag match"
+              except Exception as exc:
+                  return False, f"Failed to verify absence of branch refs/heads/{target_ref_name}: {exc}"
+
+              runs_url = (
+                  f"https://api.github.com/repos/{repository}/actions/workflows/{tests_workflow_file}/runs"
+                  f"?head_sha={target_sha}&per_page=100"
+              )
+              deadline = time.time() + timeout_seconds
+              polls = 0
+              while time.time() < deadline:
+                  polls += 1
+                  payload = fetch(runs_url)
+                  matching = [
+                      run
+                      for run in payload.get("workflow_runs", [])
+                      if run.get("head_sha") == target_sha
+                      and run.get("head_branch") == target_ref_name
+                      and run.get("event") == "push"
+                      and int(run.get("id", 0)) != current_run_id
+                  ]
+                  if matching:
+                      latest = max(matching, key=lambda run: int(run["id"]))
+                      if latest.get("status") == "completed":
+                          if latest.get("conclusion") != "success":
+                              return False, f"Exact Tests push run {latest['id']} concluded {latest.get('conclusion')!r}"
+                          run_id = int(latest["id"])
+                          attempt = int(latest["run_attempt"])
+                          jobs_url = (
+                              f"https://api.github.com/repos/{repository}/actions/runs/"
+                              f"{run_id}/attempts/{attempt}/jobs?per_page=100"
+                          )
+                          result = fetch(jobs_url)
+                          if _jobs_complete_and_green(result, expected_jobs, optional_jobs):
+                              return True, f"Verified green tag push Tests run {run_id} attempt {attempt}"
+                          return False, f"Tests run {run_id} attempt {attempt} jobs incomplete or not all green"
+                  if max_polls is not None and polls >= max_polls:
+                      break
+                  sleep(poll_interval)
+
+              return False, "Timed out waiting for exact Tests tag push workflow"
+
+
+          def main() -> int:
+              ok, message = verify_release_tests(dict(os.environ))
+              stream = sys.stdout if ok else sys.stderr
+              print(message, file=stream)
+              return 0 if ok else 1
+
+
+          if __name__ == "__main__":
+              raise SystemExit(main())
+          PY

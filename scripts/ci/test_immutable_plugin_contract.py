@@ -708,21 +708,10 @@ esac
         publish = yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"]["publish"]
         return publish, next(step for step in publish["steps"] if step.get("id") == step_id)
 
-    def _script(self, attested_checksum: str) -> str:
-        values = {
-            "steps.attestation.outputs.artifact_checksum": attested_checksum,
-            "steps.attestation.outputs.artifact_signature": "fixture-signature",
-            "steps.attestation.outputs.artifact_signature_key_id": "fixture-key",
-            "steps.attestation.outputs.sbom_url": "plugins/dev/fixture.sbom.json",
-            "steps.attestation.outputs.sbom_checksum": "sha256:" + "f" * 64,
-            "steps.attestation.outputs.artifact_policy_version": "fixture-policy",
-        }
-
-        def render(match: re.Match) -> str:
-            self.assertIn(match.group(1), values, "unrendered workflow expression in upload_dev")
-            return values[match.group(1)]
-
-        return re.sub(r"\$\{\{\s*([^}]+?)\s*\}\}", render, self._step()[1]["run"])
+    def _script(self) -> str:
+        script = self._step()[1]["run"]
+        self.assertNotIn("${{", script, "upload_dev must read its inputs from env")
+        return script
 
     def _run(self, rows=None, *, kind="plugin_version", post_code="201", get_code="200",
              pending=None, checksum=None, file_size=None, attestation="false", provenance="false",
@@ -793,6 +782,12 @@ esac
             "FILE_SIZE": str(file_size if file_size is not None else len(payload)),
             "RELEASE_TRACK": "main",
             "HAS_ATTESTATION": attestation,
+            "ARTIFACT_CHECKSUM": declared,
+            "ARTIFACT_SIGNATURE": "fixture-signature",
+            "ARTIFACT_SIGNATURE_KEY_ID": "fixture-key",
+            "SBOM_URL": "plugins/dev/fixture.sbom.json",
+            "SBOM_CHECKSUM": "sha256:" + "f" * 64,
+            "ARTIFACT_POLICY_VERSION": "fixture-policy",
             "SOURCE_PUBLISHED_AT": "2026-10-08T00:00:00Z",
             "SUBMIT_SOURCE_PROVENANCE": provenance,
             "SOURCE_PROVENANCE_ENVIRONMENT": "dev",
@@ -814,7 +809,7 @@ esac
         )
         if result.returncode == 0:
             result = subprocess.run(
-                ["bash", "--noprofile", "--norc", "-e", "-c", self._script(declared)],
+                ["bash", "--noprofile", "--norc", "-e", "-c", self._script()],
                 env=env, capture_output=True, text=True, check=False, timeout=60,
             )
         calls = (directory / "calls").read_text().splitlines()
@@ -1098,4 +1093,118 @@ class RuntimePhpContractTests(unittest.TestCase):
         self.assertIs(job.get("continue-on-error"), True)
         setup = next(step for step in job["steps"] if str(step.get("uses", "")).startswith("shivammathur/setup-php@"))
         self.assertEqual(str(setup["with"]["php-version"]), "8.4")
+
+
+class WorkflowShellInjectionContractTests(unittest.TestCase):
+    """Verify plugin identity validation before GITHUB_OUTPUT and zero ${{ }} interpolation in run:."""
+
+    ROOT = Path(__file__).resolve().parents[2]
+    WORKFLOWS_DIR = ROOT / ".github/workflows"
+
+    def _get_step(self, workflow_name: str, job_name: str, step_name: str) -> dict:
+        doc = yaml.safe_load((self.WORKFLOWS_DIR / workflow_name).read_text(encoding="utf-8"))
+        for step in doc["jobs"][job_name]["steps"]:
+            if step.get("name") == step_name:
+                return step
+        self.fail(f"Step {step_name!r} not found in {workflow_name}:{job_name}")
+
+    def _run_parse_identity_step(
+        self,
+        workflow_name: str,
+        job_name: str,
+        ini_content: str,
+        ref_name: str,
+    ) -> tuple[subprocess.CompletedProcess[str], str]:
+        step = self._get_step(workflow_name, job_name, "Parse and validate plugin identity")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "facturascripts.ini").write_text(ini_content, encoding="utf-8")
+            gh_output = tmp_path / "github_output.txt"
+            gh_output.write_text("", encoding="utf-8")
+            env = {
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "GITHUB_OUTPUT": str(gh_output),
+                "GITHUB_REF_NAME": ref_name,
+                "RELEASE_TAG": ref_name,
+            }
+            proc = subprocess.run(
+                ["bash", "-c", step["run"]],
+                cwd=tmp_path,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return proc, gh_output.read_text(encoding="utf-8")
+
+    def test_parse_and_validate_plugin_identity_rejects_malicious_name_and_version(self) -> None:
+        targets = (
+            ("reusable-immutable-plugin-candidate.yml", "source_provenance"),
+            ("reusable-promote-immutable-plugin-candidate.yml", "promote"),
+        )
+        malicious_cases = (
+            ("command_substitution_name", "name = 'x$(id)'\nversion = 1.0\n", "v1.0"),
+            ("unquoted_command_sub_name", "name = x$(id)\nversion = 1.0\n", "v1.0"),
+            ("semicolon_version", "name = BeplyTest\nversion = '1.0;id'\n", "v1.0;id"),
+            ("digit_leading_name", "name = 9BadPlugin\nversion = 1.0\n", "v1.0"),
+            ("hyphen_name", "name = Bad-Plugin\nversion = 1.0\n", "v1.0"),
+            ("overlong_name", f"name = {'A' * 65}\nversion = 1.0\n", "v1.0"),
+            ("non_numeric_version", "name = BeplyTest\nversion = 1.0-rc1\n", "v1.0-rc1"),
+            ("tag_mismatch", "name = BeplyPlugin_1\nversion = 2.3\n", "v2.4"),
+        )
+        for wf_name, job_name in targets:
+            step = self._get_step(wf_name, job_name, "Parse and validate plugin identity")
+            self.assertIn("LC_ALL=C", step["run"], f"{wf_name} must force LC_ALL=C for ASCII regex validation")
+            for case_name, ini_text, ref_name in malicious_cases:
+                with self.subTest(workflow=wf_name, case=case_name):
+                    proc, output = self._run_parse_identity_step(wf_name, job_name, ini_text, ref_name)
+                    self.assertNotEqual(
+                        proc.returncode,
+                        0,
+                        f"{wf_name}:{case_name} must fail closed, got rc=0 stdout={proc.stdout!r} output={output!r}",
+                    )
+                    self.assertEqual(
+                        output,
+                        "",
+                        f"{wf_name}:{case_name} must not write anything to GITHUB_OUTPUT before validation",
+                    )
+
+            with self.subTest(workflow=wf_name, case="valid_identity"):
+                proc, output = self._run_parse_identity_step(
+                    wf_name,
+                    job_name,
+                    "name = 'BeplyPlugin_1'\nversion = 2.3\n",
+                    "v2.3",
+                )
+                self.assertEqual(proc.returncode, 0, f"{wf_name} valid case failed: {proc.stderr!r}")
+                self.assertIn("name=BeplyPlugin_1\n", output)
+                self.assertIn("version=2.3\n", output)
+
+    def test_no_workflow_interpolates_step_outputs_or_expressions_in_run(self) -> None:
+        violations: list[str] = []
+        for wf_path in sorted(self.WORKFLOWS_DIR.glob("*.y*ml")):
+            doc = yaml.safe_load(wf_path.read_text(encoding="utf-8"))
+            for job_id, job in (doc.get("jobs") or {}).items():
+                for idx, step in enumerate(job.get("steps") or []):
+                    run = step.get("run")
+                    if isinstance(run, str) and "${{" in run:
+                        exprs = re.findall(r"\$\{\{.*?\}\}", run, re.S)
+                        violations.append(
+                            f"{wf_path.name}:{job_id}:{step.get('name', f'step[{idx}]')} -> {exprs}"
+                        )
+        self.assertEqual(
+            violations,
+            [],
+            f"Workflow run: scripts must pass values via env:, never interpolate ${{{{ ... }}}}: {violations}",
+        )
+
+        build_step = self._get_step(
+            "reusable-immutable-plugin-candidate.yml",
+            "source_provenance",
+            "Build plugin ZIP exactly once",
+        )
+        build_env = build_step.get("env") or {}
+        self.assertEqual(build_env.get("PLUGIN_NAME"), "${{ steps.ini.outputs.name }}")
+        self.assertEqual(build_env.get("PLUGIN_VERSION"), "${{ steps.ini.outputs.version }}")
+
 

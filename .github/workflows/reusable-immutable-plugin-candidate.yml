@@ -137,6 +137,7 @@ jobs:
       - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: "24"
+          package-manager-cache: false
 
       - name: Validate immutable caller and contract identities
         env:
@@ -177,12 +178,14 @@ jobs:
         working-directory: plugin
         run: |
           set -euo pipefail
+          export LC_ALL=C
           parse_field() {
-            grep -E "^$1\\s*=" facturascripts.ini | head -1 | sed 's/^[^=]*=[ ]*//' | tr -d '"\r' | xargs
+            grep -E "^$1\\s*=" facturascripts.ini | head -1 | sed -e 's/^[^=]*=[[:space:]]*//' -e 's/[[:space:]]*$//' | tr -d "\"'\r"
           }
           NAME="$(parse_field name)"
           VERSION="$(parse_field version)"
-          test -n "${NAME}" && test -n "${VERSION}"
+          [[ "${NAME}" =~ ^[A-Za-z][A-Za-z0-9_]{0,63}$ ]] || { echo "::error::invalid plugin name in facturascripts.ini"; exit 1; }
+          [[ "${VERSION}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::invalid plugin version in facturascripts.ini"; exit 1; }
           test "${GITHUB_REF_NAME}" = "v${VERSION}" || { echo "::error::tag/version mismatch"; exit 1; }
           {
             echo "name=${NAME}"
@@ -242,12 +245,15 @@ jobs:
 
       - name: Build plugin ZIP exactly once
         id: build
+        env:
+          PLUGIN_NAME: ${{ steps.ini.outputs.name }}
+          PLUGIN_VERSION: ${{ steps.ini.outputs.version }}
         run: >-
           python3 contract/scripts/ci/build_plugin_zip.py
           --plugin-root plugin
-          --plugin-name "${{ steps.ini.outputs.name }}"
-          --plugin-version "${{ steps.ini.outputs.version }}"
-          --output "/tmp/build/${{ steps.ini.outputs.name }}-v${{ steps.ini.outputs.version }}.zip"
+          --plugin-name "${PLUGIN_NAME}"
+          --plugin-version "${PLUGIN_VERSION}"
+          --output "/tmp/build/${PLUGIN_NAME}-v${PLUGIN_VERSION}.zip"
 
       - name: Create immutable GitHub Release asset
         if: steps.release.outputs.exists != 'true' && github.event_name == 'push'
@@ -392,6 +398,7 @@ jobs:
       - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: "24"
+          package-manager-cache: false
 
       - name: Validate immutable contract and provenance inputs
         env:
@@ -498,6 +505,12 @@ jobs:
           FILE_SIZE: ${{ needs.source_provenance.outputs.file_size }}
           RELEASE_TRACK: ${{ inputs.release_track }}
           HAS_ATTESTATION: ${{ steps.attestation.outputs.has_attestation }}
+          ARTIFACT_CHECKSUM: ${{ steps.attestation.outputs.artifact_checksum }}
+          ARTIFACT_SIGNATURE: ${{ steps.attestation.outputs.artifact_signature }}
+          ARTIFACT_SIGNATURE_KEY_ID: ${{ steps.attestation.outputs.artifact_signature_key_id }}
+          SBOM_URL: ${{ steps.attestation.outputs.sbom_url }}
+          SBOM_CHECKSUM: ${{ steps.attestation.outputs.sbom_checksum }}
+          ARTIFACT_POLICY_VERSION: ${{ steps.attestation.outputs.artifact_policy_version }}
           SOURCE_PUBLISHED_AT: ${{ needs.source_provenance.outputs.source_published_at }}
           SUBMIT_SOURCE_PROVENANCE: ${{ inputs.submit_source_provenance }}
           SOURCE_PROVENANCE_ENVIRONMENT: ${{ inputs.source_provenance_environment }}
@@ -507,7 +520,7 @@ jobs:
           set -euo pipefail
           test -n "${BEPLY_CI_TOKEN}" || { echo "::error::BEPLY_DEV_CI_TOKEN is required"; exit 1; }
           ZIP="/tmp/${PLUGIN_NAME}-v${PLUGIN_VERSION}.zip"
-          test "${{ steps.attestation.outputs.artifact_checksum }}" = "${CHECKSUM}" || { echo "::error::DEV attestation checksum drift"; exit 1; }
+          test "${ARTIFACT_CHECKSUM}" = "${CHECKSUM}" || { echo "::error::DEV attestation checksum drift"; exit 1; }
           # The catalog row is read back against the bytes actually sent.
           SHA256_HEX="$(sha256sum "${ZIP}" | awk '{print $1}')"
           ZIP_BYTES="$(stat -c %s "${ZIP}")"
@@ -543,11 +556,11 @@ jobs:
           fi
           if [ "${HAS_ATTESTATION}" = "true" ]; then
             CURL_FIELDS+=(
-              -F "artifactSignature=${{ steps.attestation.outputs.artifact_signature }}"
-              -F "artifactSignatureKeyId=${{ steps.attestation.outputs.artifact_signature_key_id }}"
-              -F "sbomUrl=${{ steps.attestation.outputs.sbom_url }}"
-              -F "sbomChecksum=${{ steps.attestation.outputs.sbom_checksum }}"
-              -F "artifactPolicyVersion=${{ steps.attestation.outputs.artifact_policy_version }}"
+              -F "artifactSignature=${ARTIFACT_SIGNATURE}"
+              -F "artifactSignatureKeyId=${ARTIFACT_SIGNATURE_KEY_ID}"
+              -F "sbomUrl=${SBOM_URL}"
+              -F "sbomChecksum=${SBOM_CHECKSUM}"
+              -F "artifactPolicyVersion=${ARTIFACT_POLICY_VERSION}"
             )
           fi
           RESPONSE="$(curl -sS -w '\n%{http_code}' -X POST \
