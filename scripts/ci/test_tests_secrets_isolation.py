@@ -2,7 +2,10 @@
 
 1. Jobs de pruebas (`tests.yml`, salvo `coverage-upload`):
    - Todo `actions/checkout` con `persist-credentials: false` (incluido cualquier `ssh-key:`).
-   - Ningún `secrets.*` ni `github.token` en `env` (workflow, job o paso) ni en `run`.
+   - Ningún `secrets.*`, `secrets[...]` ni `github.token` en `env` (workflow, job o paso),
+     `run` ni `with`, salvo únicamente:
+       * `actions/checkout` -> `with.ssh-key` para las deploy keys de dependencias CI;
+       * comprobación booleana `!= ''` en `env` del paso `Check CI dependency keys`.
    - `permissions` explícitos de solo lectura (`contents: read`), sin ningún `write` ni `id-token`.
    - Ninguna acción que pueda usar caché: solo `actions/checkout`, `actions/upload-artifact`,
      `actions/download-artifact`, `shivammathur/setup-php`, y `actions/setup-node` con
@@ -13,13 +16,15 @@
 3. `coverage-upload`:
    - Sin checkout del plugin.
    - Solo `actions/download-artifact@<sha40>` y acciones de terceros fijadas a SHA de 40
-     (`codecov/codecov-action@<sha40>`).
+     (`codecov/codecov-action@<sha40>` con `disable_search: true`, `files:` explícito y
+     `plugins: noop`).
    - No ejecuta ni importa nada del artefacto; no toca la caché.
    - Los secretos (`CODECOV_TOKEN`, `CI_EVIDENCE_S3_*`) viven solo ahí, con
      `permissions: contents: read`.
 """
 from __future__ import annotations
 
+import copy
 import json
 import re
 import unittest
@@ -33,8 +38,18 @@ WORKFLOW = WORKFLOWS_DIR / "tests.yml"
 TEMPLATE_SYNC = ROOT / ".beply/template-sync.json"
 
 SHA40_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}$")
-DOT_SECRET_RE = re.compile(r"\bsecrets\.[A-Za-z0-9_]+\b")
-GITHUB_TOKEN_RE = re.compile(r"\bgithub\.token\b")
+ANY_SECRET_RE = re.compile(r"\bsecrets\s*(?:\.[A-Za-z0-9_]+|\[)", re.IGNORECASE)
+GITHUB_TOKEN_RE = re.compile(
+    r"\bgithub\s*(?:\.\s*token\b|\[\s*['\"]token['\"]\s*\])",
+    re.IGNORECASE,
+)
+ALLOWED_DEP_KEY_CHECK_STEP = "Check CI dependency keys"
+ALLOWED_DEP_KEY_CHECK_RE = re.compile(
+    r"^\$\{\{\s*secrets\[needs\.quality_contract\.outputs\.dep[1-4]_ssh_key_secret\]\s*!=\s*''\s*\}\}$"
+)
+ALLOWED_DEP_SSH_KEY_RE = re.compile(
+    r"^\$\{\{\s*secrets\[needs\.quality_contract\.outputs\.dep[1-4]_ssh_key_secret\]\s*\}\}$"
+)
 UPLOAD_ONLY_SECRETS_RE = re.compile(r"\b(?:CODECOV_TOKEN|CI_EVIDENCE_S3_[A-Za-z0-9_]+)\b")
 ALLOWED_TEST_JOB_ACTIONS = {
     "actions/checkout",
@@ -75,6 +90,64 @@ def action_slug(uses: str) -> str:
     return uses.split("@", 1)[0].strip()
 
 
+def find_test_jobs_secret_violations(workflow: dict) -> list[str]:
+    """Devuelve todas las referencias prohibidas a secrets/github.token en workflow y jobs de pruebas."""
+    violations: list[str] = []
+    for key, value in iter_env_values(workflow.get("env")):
+        if ANY_SECRET_RE.search(value):
+            violations.append(f"workflow.env.{key} references a secret: {value}")
+        if GITHUB_TOKEN_RE.search(value):
+            violations.append(f"workflow.env.{key} references github.token: {value}")
+
+    jobs = workflow.get("jobs") or {}
+    for job_name, job in jobs.items():
+        if job_name == "coverage-upload":
+            continue
+        for key, value in iter_env_values(job.get("env")):
+            if ANY_SECRET_RE.search(value):
+                violations.append(f"{job_name}.env.{key} must not reference secrets: {value}")
+            if GITHUB_TOKEN_RE.search(value):
+                violations.append(f"{job_name}.env.{key} must not reference github.token: {value}")
+        for idx, step in enumerate(job.get("steps") or []):
+            step_name = str(step.get("name", ""))
+            step_label = step_name or f"step[{idx}]"
+            slug = action_slug(str(step.get("uses", "")))
+
+            for key, value in iter_env_values(step.get("env")):
+                if GITHUB_TOKEN_RE.search(value):
+                    violations.append(f"{job_name} / {step_label} env.{key} must not reference github.token")
+                if ANY_SECRET_RE.search(value):
+                    is_allowed_check = (
+                        step_name == ALLOWED_DEP_KEY_CHECK_STEP
+                        and ALLOWED_DEP_KEY_CHECK_RE.match(value.strip()) is not None
+                    )
+                    if not is_allowed_check:
+                        violations.append(
+                            f"{job_name} / {step_label} env.{key} must not reference secrets: {value}"
+                        )
+
+            run_cmd = str(step.get("run", ""))
+            if ANY_SECRET_RE.search(run_cmd):
+                violations.append(f"{job_name} / {step_label} run must not reference secrets")
+            if GITHUB_TOKEN_RE.search(run_cmd):
+                violations.append(f"{job_name} / {step_label} run must not reference github.token")
+
+            for key, value in iter_env_values(step.get("with")):
+                if GITHUB_TOKEN_RE.search(value):
+                    violations.append(f"{job_name} / {step_label} with.{key} must not reference github.token")
+                if ANY_SECRET_RE.search(value):
+                    is_allowed_ssh_key = (
+                        slug == "actions/checkout"
+                        and key == "ssh-key"
+                        and ALLOWED_DEP_SSH_KEY_RE.match(value.strip()) is not None
+                    )
+                    if not is_allowed_ssh_key:
+                        violations.append(
+                            f"{job_name} / {step_label} with.{key} must not reference secrets: {value}"
+                        )
+    return violations
+
+
 class TestsSecretsIsolationContractTests(unittest.TestCase):
     def setUp(self):
         self.workflow = load_yaml(WORKFLOW)
@@ -94,42 +167,34 @@ class TestsSecretsIsolationContractTests(unittest.TestCase):
             with self.subTest(job=job_name):
                 self._assert_readonly_permissions(job.get("permissions"), f"tests.yml job {job_name}")
 
-    def test_workflow_env_has_no_secrets_or_github_token(self):
-        for key, value in iter_env_values(self.workflow.get("env")):
-            with self.subTest(env_key=key):
-                self.assertIsNone(DOT_SECRET_RE.search(value), f"workflow env.{key} references a secret")
-                self.assertIsNone(GITHUB_TOKEN_RE.search(value), f"workflow env.{key} references github.token")
-
-    def test_test_jobs_have_no_dot_secrets_or_github_token_in_env_or_run(self):
+    def test_test_jobs_and_workflow_have_no_disallowed_secrets_or_github_token(self):
         test_jobs = {name: job for name, job in self.jobs.items() if name != "coverage-upload"}
         self.assertTrue(test_jobs, "tests.yml must define test jobs")
-        for job_name, job in test_jobs.items():
-            for key, value in iter_env_values(job.get("env")):
-                with self.subTest(job=job_name, job_env=key):
-                    self.assertIsNone(DOT_SECRET_RE.search(value), f"{job_name}.env.{key} must not use secrets.*")
-                    self.assertIsNone(GITHUB_TOKEN_RE.search(value), f"{job_name}.env.{key} must not use github.token")
-            for idx, step in enumerate(job.get("steps", [])):
-                step_label = step.get("name", f"step[{idx}]")
-                for key, value in iter_env_values(step.get("env")):
-                    with self.subTest(job=job_name, step=step_label, env_key=key):
-                        self.assertIsNone(
-                            DOT_SECRET_RE.search(value),
-                            f"{job_name} / {step_label} env.{key} must not reference secrets.*",
-                        )
-                        self.assertIsNone(
-                            GITHUB_TOKEN_RE.search(value),
-                            f"{job_name} / {step_label} env.{key} must not reference github.token",
-                        )
-                run_cmd = str(step.get("run", ""))
-                with self.subTest(job=job_name, step=step_label, field="run"):
-                    self.assertIsNone(
-                        DOT_SECRET_RE.search(run_cmd),
-                        f"{job_name} / {step_label} run must not reference secrets.*",
-                    )
-                    self.assertIsNone(
-                        GITHUB_TOKEN_RE.search(run_cmd),
-                        f"{job_name} / {step_label} run must not reference github.token",
-                    )
+        violations = find_test_jobs_secret_violations(self.workflow)
+        self.assertEqual(violations, [], f"Disallowed secret references found: {violations}")
+
+    def test_contract_rejects_bracket_secrets_mutants_in_env_run_and_with(self):
+        cases = [
+            ("workflow_env_single_quote", lambda wf: wf.setdefault("env", {}).__setitem__("LEAK", "${{ secrets['X'] }}")),
+            ("job_env_single_quote", lambda wf: wf["jobs"]["unit"].setdefault("env", {}).__setitem__("LEAK", "${{ secrets['X'] }}")),
+            ("step_env_single_quote", lambda wf: wf["jobs"]["unit"]["steps"][0].setdefault("env", {}).__setitem__("LEAK", "${{ secrets['X'] }}")),
+            ("step_env_double_quote", lambda wf: wf["jobs"]["unit"]["steps"][0].setdefault("env", {}).__setitem__("LEAK", '${{ secrets["X"] }}')),
+            ("step_env_check_step_without_bool", lambda wf: wf["jobs"]["unit"]["steps"][2]["env"].__setitem__("LEAK", "${{ secrets['X'] }}")),
+            ("step_run_single_quote", lambda wf: wf["jobs"]["unit"]["steps"][-1].__setitem__("run", "echo ${{ secrets['X'] }}")),
+            ("step_run_double_quote", lambda wf: wf["jobs"]["unit"]["steps"][-1].__setitem__("run", 'echo ${{ secrets["X"] }}')),
+            ("step_run_bool_expression_forbidden", lambda wf: wf["jobs"]["unit"]["steps"][2].__setitem__("run", "echo ${{ secrets[needs.quality_contract.outputs.dep1_ssh_key_secret] != '' }}")),
+            ("step_with_non_ssh_key_forbidden", lambda wf: wf["jobs"]["unit"]["steps"][0]["with"].__setitem__("token", "${{ secrets['X'] }}")),
+            ("step_env_github_bracket_token", lambda wf: wf["jobs"]["unit"]["steps"][0].setdefault("env", {}).__setitem__("LEAK", "${{ github['token'] }}")),
+        ]
+        for case_name, mutate in cases:
+            with self.subTest(mutant=case_name):
+                mutated = copy.deepcopy(self.workflow)
+                mutate(mutated)
+                violations = find_test_jobs_secret_violations(mutated)
+                self.assertTrue(
+                    violations,
+                    f"Mutant {case_name} must be rejected by secret isolation contract",
+                )
 
     def test_test_jobs_only_use_allowed_non_caching_actions_and_disable_persist_credentials(self):
         for job_name, job in self.jobs.items():
@@ -216,10 +281,41 @@ class TestsSecretsIsolationContractTests(unittest.TestCase):
                 )
                 if uses:
                     self.assertRegex(uses, SHA40_RE, f"coverage-upload step {step_label} must pin a 40-hex SHA")
+                    with_cfg = step.get("with") or {}
                     if uses.startswith("actions/download-artifact@"):
                         saw_download = True
+                        self.assertEqual(
+                            with_cfg.get("path"),
+                            "coverage-artifacts",
+                            "coverage-upload download-artifact must extract into coverage-artifacts",
+                        )
+                        self.assertIs(
+                            with_cfg.get("merge-multiple"),
+                            True,
+                            "coverage-upload download-artifact must set merge-multiple: true for explicit files path",
+                        )
                     if uses.startswith("codecov/codecov-action@"):
                         saw_codecov = True
+                        self.assertIs(
+                            with_cfg.get("disable_search"),
+                            True,
+                            "coverage-upload codecov-action must set disable_search: true",
+                        )
+                        self.assertEqual(
+                            with_cfg.get("files"),
+                            "coverage-artifacts/coverage.xml",
+                            "coverage-upload codecov-action must pass explicit files: coverage-artifacts/coverage.xml",
+                        )
+                        self.assertEqual(
+                            with_cfg.get("plugins"),
+                            "noop",
+                            "coverage-upload codecov-action must set plugins: noop",
+                        )
+                        self.assertNotIn(
+                            "directory",
+                            with_cfg,
+                            "coverage-upload codecov-action must not set directory when disable_search: true",
+                        )
                 if "run" in step:
                     run_cmd = str(step["run"])
                     self.assertIsNone(
