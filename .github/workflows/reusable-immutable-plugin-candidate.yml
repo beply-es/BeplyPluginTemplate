@@ -178,6 +178,7 @@ jobs:
         working-directory: plugin
         run: |
           set -euo pipefail
+          export LC_ALL=C
           parse_field() {
             grep -E "^$1\\s*=" facturascripts.ini | head -1 | sed -e 's/^[^=]*=[[:space:]]*//' -e 's/[[:space:]]*$//' | tr -d "\"'\r"
           }
