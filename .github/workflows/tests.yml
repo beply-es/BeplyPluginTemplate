@@ -27,6 +27,8 @@ jobs:
   quality_contract:
     name: Quality Contract
     timeout-minutes: 10
+    permissions:
+      contents: read
     runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
 
     outputs:
@@ -62,6 +64,7 @@ jobs:
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
           node-version: '24'
+          package-manager-cache: false
 
       - name: Validate template contract
         run: node scripts/ci/validate-template-contract.mjs
@@ -111,6 +114,8 @@ jobs:
     timeout-minutes: 10
     continue-on-error: true
     if: github.event.pull_request.draft != true
+    permissions:
+      contents: read
     runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
 
     steps:
@@ -133,6 +138,8 @@ jobs:
     needs: quality_contract
     timeout-minutes: 10
     if: github.event.pull_request.draft != true
+    permissions:
+      contents: read
     runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     strategy:
       fail-fast: false
@@ -184,6 +191,8 @@ jobs:
     needs: [quality_contract, lint]
     if: github.event.pull_request.draft != true
     timeout-minutes: 20
+    permissions:
+      contents: read
     runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     strategy:
       fail-fast: false
@@ -388,6 +397,8 @@ jobs:
     needs: [quality_contract, lint]
     if: github.event.pull_request.draft != true
     timeout-minutes: 20
+    permissions:
+      contents: read
     runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     strategy:
       fail-fast: false
@@ -576,6 +587,8 @@ jobs:
     needs: [quality_contract, lint]
     if: github.event.pull_request.draft != true
     timeout-minutes: 25
+    permissions:
+      contents: read
     runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     strategy:
       fail-fast: false
@@ -694,6 +707,7 @@ jobs:
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
           node-version: '24'
+          package-manager-cache: false
 
       - name: Install Composer dependencies
         if: steps.e2e-targets.outputs.has_tests == 'true'

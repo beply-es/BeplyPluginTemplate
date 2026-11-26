@@ -1,19 +1,22 @@
-"""Contrato de aislamiento de secretos en tests.yml (TAREA-587.14, r8 del fusionador).
+"""Contrato de aislamiento de secretos y caché en workflows (TAREA-587.14, r8 del fusionador).
 
-Los jobs que corren pruebas en los plugins no deben recibir secretos ni credenciales
-persistidas, para que el fusionador deje de tratar Test/ como arnés de CI:
-1. Ningún job de pruebas usa `secrets.<NOMBRE>` ni `github.token` en `env` (workflow,
-   job o paso) ni en `run`; todo `actions/checkout` lleva `persist-credentials: false`
-   (incluido cualquier checkout con `ssh-key:`).
-2. `coverage-upload` NO hace checkout del plugin. Sus pasos son solo
-   `actions/download-artifact@<sha40>`, acciones de terceros fijadas a SHA de 40
-   (`codecov/codecov-action@<sha40>`) y, si existieran, `run` que tratan los ficheros
-   solo como datos (`curl`, `aws s3 cp`, `sha256sum`).
-3. En `coverage-upload` ningún `run` ejecuta nada del artefacto ni carga módulos
-   (nada de `bash`/`sh`/`php`/`node`/`python` sobre ficheros descargados, ni
-   `python -m`/`-c` con `import`, `node -e` con `require` ni `php -r` con `require`).
-4. Los secretos (`CODECOV_TOKEN`, `CI_EVIDENCE_S3_*`) viven solo en `coverage-upload`,
-   con `permissions: contents: read`.
+1. Jobs de pruebas (`tests.yml`, salvo `coverage-upload`):
+   - Todo `actions/checkout` con `persist-credentials: false` (incluido cualquier `ssh-key:`).
+   - Ningún `secrets.*` ni `github.token` en `env` (workflow, job o paso) ni en `run`.
+   - `permissions` explícitos de solo lectura (`contents: read`), sin ningún `write` ni `id-token`.
+   - Ninguna acción que pueda usar caché: solo `actions/checkout`, `actions/upload-artifact`,
+     `actions/download-artifact`, `shivammathur/setup-php`, y `actions/setup-node` con
+     `package-manager-cache: false` y sin `cache:`.
+2. Ningún workflow del repo (`tests.yml`, `release.yml`, `promote-prod.yml`, reutilizables)
+   restaura caché: sin `actions/cache` y todo `actions/setup-node` con
+   `package-manager-cache: false` y sin `cache:`.
+3. `coverage-upload`:
+   - Sin checkout del plugin.
+   - Solo `actions/download-artifact@<sha40>` y acciones de terceros fijadas a SHA de 40
+     (`codecov/codecov-action@<sha40>`).
+   - No ejecuta ni importa nada del artefacto; no toca la caché.
+   - Los secretos (`CODECOV_TOKEN`, `CI_EVIDENCE_S3_*`) viven solo ahí, con
+     `permissions: contents: read`.
 """
 from __future__ import annotations
 
@@ -25,13 +28,21 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
-WORKFLOW = ROOT / ".github/workflows/tests.yml"
+WORKFLOWS_DIR = ROOT / ".github/workflows"
+WORKFLOW = WORKFLOWS_DIR / "tests.yml"
 TEMPLATE_SYNC = ROOT / ".beply/template-sync.json"
 
 SHA40_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}$")
 DOT_SECRET_RE = re.compile(r"\bsecrets\.[A-Za-z0-9_]+\b")
 GITHUB_TOKEN_RE = re.compile(r"\bgithub\.token\b")
 UPLOAD_ONLY_SECRETS_RE = re.compile(r"\b(?:CODECOV_TOKEN|CI_EVIDENCE_S3_[A-Za-z0-9_]+)\b")
+ALLOWED_TEST_JOB_ACTIONS = {
+    "actions/checkout",
+    "actions/upload-artifact",
+    "actions/download-artifact",
+    "shivammathur/setup-php",
+    "actions/setup-node",
+}
 FORBIDDEN_EXEC_RE = re.compile(
     r"(?:"
     r"\b(?:bash|sh|zsh|dash|php|node|python3?)\b"
@@ -49,8 +60,8 @@ FORBIDDEN_EXEC_RE = re.compile(
 )
 
 
-def load_workflow() -> dict:
-    return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+def load_yaml(path: Path) -> dict:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
 def iter_env_values(mapping: dict | None):
@@ -60,10 +71,28 @@ def iter_env_values(mapping: dict | None):
         yield str(key), str(value)
 
 
+def action_slug(uses: str) -> str:
+    return uses.split("@", 1)[0].strip()
+
+
 class TestsSecretsIsolationContractTests(unittest.TestCase):
     def setUp(self):
-        self.workflow = load_workflow()
+        self.workflow = load_yaml(WORKFLOW)
         self.jobs = self.workflow["jobs"]
+
+    def _assert_readonly_permissions(self, perms, label: str):
+        self.assertIsInstance(perms, dict, f"{label} must declare explicit permissions mapping")
+        self.assertEqual(perms.get("contents"), "read", f"{label} must declare contents: read")
+        self.assertNotIn("id-token", perms, f"{label} must not declare id-token permission")
+        for scope, level in perms.items():
+            self.assertNotEqual(level, "write", f"{label} permission {scope} must not be write")
+            self.assertIn(level, ("read", "none"), f"{label} permission {scope}={level!r} must be read or none")
+
+    def test_workflow_and_jobs_have_explicit_readonly_permissions_and_no_id_token(self):
+        self._assert_readonly_permissions(self.workflow.get("permissions"), "tests.yml workflow")
+        for job_name, job in self.jobs.items():
+            with self.subTest(job=job_name):
+                self._assert_readonly_permissions(job.get("permissions"), f"tests.yml job {job_name}")
 
     def test_workflow_env_has_no_secrets_or_github_token(self):
         for key, value in iter_env_values(self.workflow.get("env")):
@@ -102,30 +131,69 @@ class TestsSecretsIsolationContractTests(unittest.TestCase):
                         f"{job_name} / {step_label} run must not reference github.token",
                     )
 
-    def test_every_checkout_in_test_jobs_disables_persist_credentials(self):
+    def test_test_jobs_only_use_allowed_non_caching_actions_and_disable_persist_credentials(self):
         for job_name, job in self.jobs.items():
             if job_name == "coverage-upload":
                 continue
             for idx, step in enumerate(job.get("steps", [])):
                 uses = str(step.get("uses", ""))
-                if uses.startswith("actions/checkout@"):
-                    with self.subTest(job=job_name, step=step.get("name", f"step[{idx}]")):
-                        self.assertRegex(uses, SHA40_RE, f"{job_name}: checkout must be pinned to 40-hex SHA")
-                        with_cfg = step.get("with") or {}
+                if not uses:
+                    continue
+                step_label = step.get("name", f"step[{idx}]")
+                slug = action_slug(uses)
+                with self.subTest(job=job_name, step=step_label):
+                    self.assertRegex(uses, SHA40_RE, f"{job_name}: action {uses} must be pinned to 40-hex SHA")
+                    self.assertIn(
+                        slug,
+                        ALLOWED_TEST_JOB_ACTIONS,
+                        f"{job_name} / {step_label} uses disallowed/cache-capable action {slug}",
+                    )
+                    with_cfg = step.get("with") or {}
+                    if slug == "actions/checkout":
                         self.assertIs(
                             with_cfg.get("persist-credentials"),
                             False,
-                            f"{job_name} / {step.get('name')} must set persist-credentials: false",
+                            f"{job_name} / {step_label} must set persist-credentials: false",
                         )
+                    if slug == "actions/setup-node":
+                        self.assertIs(
+                            with_cfg.get("package-manager-cache"),
+                            False,
+                            f"{job_name} / {step_label} must set package-manager-cache: false",
+                        )
+                        self.assertNotIn("cache", with_cfg, f"{job_name} / {step_label} must not set cache:")
 
-    def test_coverage_upload_job_exists_with_read_permissions_and_no_checkout(self):
+    def test_no_workflow_in_repo_restores_cache_or_enables_setup_node_cache(self):
+        for wf_path in sorted(WORKFLOWS_DIR.glob("*.y*ml")):
+            doc = load_yaml(wf_path)
+            for job_name, job in (doc.get("jobs") or {}).items():
+                for idx, step in enumerate(job.get("steps") or []):
+                    uses = str(step.get("uses", ""))
+                    if not uses:
+                        continue
+                    slug = action_slug(uses)
+                    with self.subTest(workflow=wf_path.name, job=job_name, step=step.get("name", f"step[{idx}]")):
+                        self.assertFalse(
+                            slug.startswith("actions/cache"),
+                            f"{wf_path.name}:{job_name} must not use actions/cache",
+                        )
+                        if slug == "actions/setup-node":
+                            with_cfg = step.get("with") or {}
+                            self.assertIs(
+                                with_cfg.get("package-manager-cache"),
+                                False,
+                                f"{wf_path.name}:{job_name} setup-node must set package-manager-cache: false",
+                            )
+                            self.assertNotIn(
+                                "cache",
+                                with_cfg,
+                                f"{wf_path.name}:{job_name} setup-node must not set cache:",
+                            )
+
+    def test_coverage_upload_job_exists_with_read_permissions_no_checkout_and_no_cache(self):
         self.assertIn("coverage-upload", self.jobs, "tests.yml must define a dedicated coverage-upload job")
         job = self.jobs["coverage-upload"]
-        self.assertEqual(
-            {"contents": "read"},
-            job.get("permissions"),
-            "coverage-upload must explicitly declare permissions: contents: read",
-        )
+        self._assert_readonly_permissions(job.get("permissions"), "coverage-upload")
         needs = job.get("needs")
         needs_list = [needs] if isinstance(needs, str) else list(needs or [])
         self.assertIn("unit", needs_list, "coverage-upload must depend on unit")
@@ -141,6 +209,10 @@ class TestsSecretsIsolationContractTests(unittest.TestCase):
                 self.assertFalse(
                     uses.startswith("actions/checkout"),
                     "coverage-upload must NOT checkout the plugin repository",
+                )
+                self.assertFalse(
+                    uses.startswith("actions/cache"),
+                    "coverage-upload must NOT touch cache",
                 )
                 if uses:
                     self.assertRegex(uses, SHA40_RE, f"coverage-upload step {step_label} must pin a 40-hex SHA")
