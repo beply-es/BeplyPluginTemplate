@@ -545,7 +545,8 @@ class SourceProvenanceCarrierTests(unittest.TestCase):
                     git("remote", "add", "origin", str(root / "origin.git"))
                     git("push", "origin", "HEAD:refs/heads/main", "refs/tags/v1.2")
                     result = subprocess.run(["bash", "-c", guard], cwd=root,
-                                            env={**env, "GITHUB_EVENT_NAME": event,
+                                            env={**env, "GH_TOKEN": "synthetic",
+                                                 "GITHUB_EVENT_NAME": event,
                                                  "GITHUB_REF_NAME": "v1.2", "GITHUB_SHA": sha},
                                             capture_output=True, text=True)
                     self.assertEqual(result.returncode == 0, allowed, result.stdout + result.stderr)

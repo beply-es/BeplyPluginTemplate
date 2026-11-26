@@ -7,16 +7,36 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 
-# Matches network-touching git invocations (allowing flags like -C <dir> or -c <k=v> before subcommand).
+# Matches network-touching git invocations (including command substitutions $(git ...),
+# shell conditionals like `if git ls-remote ...`, and flags like -C/-c before subcommand).
 GIT_NETWORK_CMD_RE = re.compile(
-    r"(?:^|[;&|]\s*|\n\s*)git\b[^\n;&|]*\b(fetch|pull|push|ls-remote|clone)\b",
-    re.MULTILINE,
+    r"(?:^|[;&|(`{\s]|\$\()git\b[^\n;&|)`}]*\b(fetch|pull|push|ls-remote|clone)\b",
 )
 
 EXPLICIT_GIT_AUTH_RE = re.compile(
     r"-c\s+[\"']?http(?:\.https://github\.com/)?\.extraheader=AUTHORIZATION:",
     re.IGNORECASE,
 )
+
+
+def iter_logical_lines(run_script: str) -> list[tuple[int, str]]:
+    """Collapse shell backslash line continuations into logical lines with starting line numbers."""
+    logical: list[tuple[int, str]] = []
+    buf: list[str] = []
+    start_line = 1
+    for line_no, raw_line in enumerate(run_script.splitlines(), start=1):
+        if not buf:
+            start_line = line_no
+        rstripped = raw_line.rstrip()
+        if rstripped.endswith("\\"):
+            buf.append(rstripped[:-1])
+        else:
+            buf.append(raw_line)
+            logical.append((start_line, " ".join(part.strip() for part in buf if part.strip())))
+            buf = []
+    if buf:
+        logical.append((start_line, " ".join(part.strip() for part in buf if part.strip())))
+    return logical
 
 
 def find_workflow_credential_violations(workflow_name: str, data: dict) -> list[str]:
@@ -51,21 +71,20 @@ def find_workflow_credential_violations(workflow_name: str, data: dict) -> list[
             if not isinstance(run_script, str):
                 continue
             env_cfg = step.get("env") if isinstance(step.get("env"), dict) else {}
-            for line_no, raw_line in enumerate(run_script.splitlines(), start=1):
-                stripped = raw_line.strip()
+            has_token_env = any(
+                k in env_cfg for k in ("GH_TOKEN", "GITHUB_TOKEN")
+            )
+            for line_no, stripped in iter_logical_lines(run_script):
                 if not stripped or stripped.startswith("#"):
                     continue
-                if not GIT_NETWORK_CMD_RE.search(stripped):
-                    continue
-                has_extraheader = bool(EXPLICIT_GIT_AUTH_RE.search(stripped))
-                has_token_env = any(
-                    k in env_cfg for k in ("GH_TOKEN", "GITHUB_TOKEN")
-                )
-                if not (has_extraheader and has_token_env):
-                    violations.append(
-                        f"{workflow_name}::{job_id}::{step_label} (run line {line_no}): "
-                        f"network git command without explicit per-command auth (http.extraheader + GH_TOKEN/GITHUB_TOKEN): {stripped}"
-                    )
+                for match in GIT_NETWORK_CMD_RE.finditer(stripped):
+                    cmd_fragment = match.group(0).strip()
+                    has_extraheader = bool(EXPLICIT_GIT_AUTH_RE.search(cmd_fragment))
+                    if not (has_extraheader and has_token_env):
+                        violations.append(
+                            f"{workflow_name}::{job_id}::{step_label} (run line {line_no}): "
+                            f"network git command without explicit per-command auth (http.extraheader + GH_TOKEN/GITHUB_TOKEN): {stripped}"
+                        )
 
     return violations
 
@@ -158,6 +177,76 @@ class WorkflowCheckoutCredentialsContractTest(unittest.TestCase):
             }
         }
         self.assertEqual([], find_workflow_credential_violations("auth-ok.yml", wf_auth))
+
+    def test_mutant_m3_command_substitution_git_is_rejected(self) -> None:
+        wf = {
+            "jobs": {
+                "release": {
+                    "steps": [
+                        {
+                            "name": "Inspect remote tag",
+                            "run": 'REMOTE_SHA="$(git -C plugin ls-remote origin refs/tags/v1.0)"',
+                        }
+                    ]
+                }
+            }
+        }
+        violations = find_workflow_credential_violations("mutant-m3-cmdsub.yml", wf)
+        self.assertEqual(1, len(violations))
+        self.assertIn("network git command without explicit per-command auth", violations[0])
+
+    def test_mutant_m4_line_continuation_git_fetch_is_rejected(self) -> None:
+        wf = {
+            "jobs": {
+                "release": {
+                    "steps": [
+                        {
+                            "name": "Fetch tag multiline",
+                            "run": 'git -C plugin \\\n  fetch --force origin "+refs/tags/v1.0:refs/tags/v1.0"',
+                        }
+                    ]
+                }
+            }
+        }
+        violations = find_workflow_credential_violations("mutant-m4-multiline.yml", wf)
+        self.assertEqual(1, len(violations))
+        self.assertIn("network git command without explicit per-command auth", violations[0])
+
+        wf_multiline_auth = {
+            "jobs": {
+                "release": {
+                    "steps": [
+                        {
+                            "name": "Fetch tag multiline with auth",
+                            "env": {"GH_TOKEN": "${{ github.token }}"},
+                            "run": (
+                                'git -C plugin \\\n'
+                                '  -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${AUTH_HEADER}" \\\n'
+                                '  fetch --force origin "+refs/tags/v1.0:refs/tags/v1.0"'
+                            ),
+                        }
+                    ]
+                }
+            }
+        }
+        self.assertEqual([], find_workflow_credential_violations("multiline-auth-ok.yml", wf_multiline_auth))
+
+    def test_mutant_m6_conditional_if_git_ls_remote_is_rejected(self) -> None:
+        wf = {
+            "jobs": {
+                "release": {
+                    "steps": [
+                        {
+                            "name": "Check remote ref",
+                            "run": "if git ls-remote --exit-code origin refs/tags/v1.0; then echo exists; fi",
+                        }
+                    ]
+                }
+            }
+        }
+        violations = find_workflow_credential_violations("mutant-m6-if.yml", wf)
+        self.assertEqual(1, len(violations))
+        self.assertIn("network git command without explicit per-command auth", violations[0])
 
 
 if __name__ == "__main__":
