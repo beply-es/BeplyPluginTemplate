@@ -1,0 +1,342 @@
+name: Release Plugin
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - 'v*'
+    paths-ignore:
+      - '.github/**'
+      - 'README.md'
+      - 'docs/**'
+      - 'Doc/**'
+      - 'Test/**'
+      - 'Tests/**'
+      - 'tests/**'
+      - 'coverage-html/**'
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+concurrency:
+  group: beplycashbox-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  verify_tests:
+    name: Verify Tests Workflow
+    timeout-minutes: 50
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
+
+    steps:
+      - name: Wait for Tests workflow on this commit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TARGET_SHA: ${{ github.sha }}
+          TARGET_REF_NAME: ${{ github.ref_name }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          import time
+          import urllib.request
+
+          repository = os.environ["REPOSITORY"]
+          target_sha = os.environ["TARGET_SHA"]
+          target_ref_name = os.environ["TARGET_REF_NAME"]
+          current_run_id = int(os.environ["CURRENT_RUN_ID"])
+          token = os.environ["GITHUB_TOKEN"]
+          api_url = f"https://api.github.com/repos/{repository}/actions/runs?head_sha={target_sha}&per_page=100"
+          deadline = time.time() + 49 * 60
+
+          while time.time() < deadline:
+              request = urllib.request.Request(
+                  api_url,
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "User-Agent": "beplycashbox-release-gate",
+                  },
+              )
+              with urllib.request.urlopen(request) as response:
+                  payload = json.load(response)
+
+              runs = [
+                  run for run in payload.get("workflow_runs", [])
+                  if run.get("name") == "Tests"
+                  and int(run.get("id", 0)) != current_run_id
+                  and run.get("head_branch") == target_ref_name
+              ]
+              if not runs:
+                  print("Waiting for Tests workflow to start on this commit...")
+                  time.sleep(15)
+                  continue
+
+              run = runs[0]
+              status = run.get("status")
+              conclusion = run.get("conclusion")
+              print(f"Tests workflow status={status} conclusion={conclusion} url={run.get('html_url', '')}")
+              if status != "completed":
+                  time.sleep(15)
+                  continue
+              if conclusion == "success":
+                  sys.exit(0)
+
+              print(f"Tests workflow did not succeed: {conclusion}", file=sys.stderr)
+              sys.exit(1)
+
+          print("Timed out waiting for Tests workflow to complete successfully.", file=sys.stderr)
+          sys.exit(1)
+          PY
+
+  upload_dev:
+    name: Upload Dev Candidate
+    needs: verify_tests
+    if: github.ref_type == 'branch' && github.ref_name == (vars.BEPLY_RELEASE_BRANCH || 'main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    timeout-minutes: 15
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
+
+    steps:
+      - name: Checkout Plugin
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@accd6127cb78bee3e8082180cb391013d204ef9f # 2.37.0
+        with:
+          php-version: '8.4'
+          extensions: intl, zip, curl
+          coverage: none
+
+      - name: Parse facturascripts.ini
+        id: ini
+        run: |
+          parse_field() {
+            local key="$1"
+            grep -E "^${key}\\s*=" facturascripts.ini | head -1 | sed 's/^[^=]*=[ ]*//' | sed 's/^"\\(.*\\)"$/\\1/' | tr -d '\r' | xargs
+          }
+          {
+            echo "version=$(parse_field version)"
+            echo "name=$(parse_field name)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build plugin zip
+        id: build_zip
+        env:
+          PLUGIN_NAME: ${{ steps.ini.outputs.name }}
+          PLUGIN_VERSION: ${{ steps.ini.outputs.version }}
+        run: |
+          set -euo pipefail
+          zip_path="${RUNNER_TEMP}/${PLUGIN_NAME}-dev-${PLUGIN_VERSION}.zip"
+          scripts/build-release-zip.sh "${zip_path}"
+          php scripts/validate-release-zip.php "${zip_path}"
+          echo "ZIP_PATH=${zip_path}" >> "${GITHUB_ENV}"
+          echo "zip_path=${zip_path}" >> "${GITHUB_OUTPUT}"
+
+      - name: Define dev release metadata
+        id: dev_release_metadata
+        run: |
+          set -euo pipefail
+          {
+            echo "source_branch=main"
+            echo "source_release_tag=${GITHUB_REF_NAME}-${GITHUB_SHA::12}"
+            echo "source_release_url=https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Generate artifact attestation
+        id: dev_attestation
+        env:
+          PLUGIN_NAME: ${{ steps.ini.outputs.name }}
+          PLUGIN_VERSION: ${{ steps.ini.outputs.version }}
+          PLUGIN_ZIP: ${{ steps.build_zip.outputs.zip_path }}
+          PLUGIN_RELEASE_TRACK: main
+          PLUGIN_ARTIFACT_PREFIX: plugins/dev
+          SOURCE_REPO_FULL_NAME: ${{ github.repository }}
+          SOURCE_RELEASE_TAG: ${{ steps.dev_release_metadata.outputs.source_release_tag }}
+          SOURCE_RELEASE_URL: ${{ steps.dev_release_metadata.outputs.source_release_url }}
+          PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY: ${{ secrets.BEPLY_DEV_PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY }}
+          PLUGIN_ARTIFACT_SIGNATURE_KEY_ID: ${{ secrets.BEPLY_DEV_PLUGIN_ARTIFACT_SIGNATURE_KEY_ID }}
+        run: node scripts/ci/build-plugin-artifact-attestation.mjs
+
+      - name: Upload candidate to Beply dev
+        env:
+          BEPLY_API_URL: https://api.services.devbeply.es
+          BEPLY_CI_TOKEN: ${{ secrets.BEPLY_DEV_CI_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BEPLY_CI_TOKEN:-}" ]; then
+            echo "::error::BEPLY_DEV_CI_TOKEN is required for dev platform upload."
+            exit 1
+          fi
+          if [ "${{ steps.dev_attestation.outputs.has_attestation }}" != "true" ]; then
+            echo "::error::Dev signing secrets are required when BEPLY_DEV_CI_TOKEN is configured."
+            exit 1
+          fi
+
+          body="$(mktemp)"
+          status="$(
+            curl -sS -o "${body}" -w "%{http_code}" -X POST \
+              -H "Authorization: Bearer ${BEPLY_CI_TOKEN}" \
+              -F "file=@${ZIP_PATH}" \
+              -F "sourceRepoFullName=${{ github.repository }}" \
+              -F "sourceBranch=${{ steps.dev_release_metadata.outputs.source_branch }}" \
+              -F "sourceReleaseTag=${{ steps.dev_release_metadata.outputs.source_release_tag }}" \
+              -F "sourceReleaseUrl=${{ steps.dev_release_metadata.outputs.source_release_url }}" \
+              -F "sourcePublishedAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              -F "artifactSignature=${{ steps.dev_attestation.outputs.artifact_signature }}" \
+              -F "artifactSignatureKeyId=${{ steps.dev_attestation.outputs.artifact_signature_key_id }}" \
+              -F "sbomUrl=${{ steps.dev_attestation.outputs.sbom_url }}" \
+              -F "sbomChecksum=${{ steps.dev_attestation.outputs.sbom_checksum }}" \
+              -F "artifactPolicyVersion=${{ steps.dev_attestation.outputs.artifact_policy_version }}" \
+              "${BEPLY_API_URL}/api/v1/plugins/release"
+          )"
+
+          cat "${body}"
+          if [ "${status}" -ge 200 ] && [ "${status}" -lt 300 ]; then
+            exit 0
+          fi
+          if [ "${status}" = "409" ] && grep -Eq 'VERSION_ALREADY_APPROVED|SUBMISSION_PENDING' "${body}"; then
+            exit 0
+          fi
+          echo "::error::Dev platform upload failed with HTTP ${status}"
+          exit 1
+
+  release_prod:
+    name: Release Prod Candidate
+    needs: verify_tests
+    if: startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    timeout-minutes: 15
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
+
+    steps:
+      - name: Checkout Plugin
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@accd6127cb78bee3e8082180cb391013d204ef9f # 2.37.0
+        with:
+          php-version: '8.4'
+          extensions: intl, zip, curl
+          coverage: none
+
+      - name: Parse facturascripts.ini
+        id: ini
+        run: |
+          parse_field() {
+            local key="$1"
+            grep -E "^${key}\\s*=" facturascripts.ini | head -1 | sed 's/^[^=]*=[ ]*//' | sed 's/^"\\(.*\\)"$/\\1/' | tr -d '\r' | xargs
+          }
+          {
+            echo "version=$(parse_field version)"
+            echo "name=$(parse_field name)"
+            echo "min_version=$(parse_field min_version)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate tag matches plugin version
+        run: |
+          set -euo pipefail
+          expected_tag="v${{ steps.ini.outputs.version }}"
+          if [ "${GITHUB_REF_NAME}" != "${expected_tag}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match facturascripts.ini version ${expected_tag}"
+            exit 1
+          fi
+
+      - name: Build plugin zip
+        id: build_zip
+        env:
+          PLUGIN_NAME: ${{ steps.ini.outputs.name }}
+          PLUGIN_VERSION: ${{ steps.ini.outputs.version }}
+        run: |
+          set -euo pipefail
+          zip_path="/tmp/${PLUGIN_NAME}-v${PLUGIN_VERSION}.zip"
+          scripts/build-release-zip.sh "${zip_path}"
+          php scripts/validate-release-zip.php "${zip_path}"
+          echo "ZIP_PATH=${zip_path}" >> "${GITHUB_ENV}"
+          echo "zip_path=${zip_path}" >> "${GITHUB_OUTPUT}"
+
+      - name: Generate artifact attestation
+        id: prod_attestation
+        env:
+          PLUGIN_NAME: ${{ steps.ini.outputs.name }}
+          PLUGIN_VERSION: ${{ steps.ini.outputs.version }}
+          PLUGIN_ZIP: ${{ steps.build_zip.outputs.zip_path }}
+          PLUGIN_RELEASE_TRACK: main
+          PLUGIN_ARTIFACT_PREFIX: plugins/prod
+          SOURCE_REPO_FULL_NAME: ${{ github.repository }}
+          SOURCE_RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_RELEASE_URL: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}
+          PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY: ${{ secrets.BEPLY_PLUGIN_ARTIFACT_SIGNING_PRIVATE_KEY }}
+          PLUGIN_ARTIFACT_SIGNATURE_KEY_ID: ${{ secrets.BEPLY_PLUGIN_ARTIFACT_SIGNATURE_KEY_ID }}
+        run: node scripts/ci/build-plugin-artifact-attestation.mjs
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@6cbd405e2c4e67a21c47fa9e383d020e4e28b836 # v2.3.3
+        with:
+          tag_name: "${{ github.ref_name }}"
+          name: "${{ steps.ini.outputs.name }} ${{ github.ref_name }}"
+          body: |
+            ## ${{ steps.ini.outputs.name }} ${{ github.ref_name }}
+
+            | Campo | Valor |
+            | --- | --- |
+            | Version | `${{ steps.ini.outputs.version }}` |
+            | Version minima FS | `${{ steps.ini.outputs.min_version }}` |
+          files: |
+            ${{ env.ZIP_PATH }}
+            ${{ steps.prod_attestation.outputs.sbom_path }}
+
+      - name: Upload to Beply Platform
+        if: vars.BEPLY_PROD_PANEL_PUBLISH_ENABLED == 'true'
+        env:
+          BEPLY_API_URL: ${{ secrets.BEPLY_API_URL }}
+          BEPLY_CI_TOKEN: ${{ secrets.BEPLY_CI_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BEPLY_API_URL:-}" ] || [ -z "${BEPLY_CI_TOKEN:-}" ]; then
+            echo "::error::BEPLY_API_URL and BEPLY_CI_TOKEN are required for platform upload."
+            exit 1
+          fi
+          if [ "${{ steps.prod_attestation.outputs.has_attestation }}" != "true" ]; then
+            echo "::error::Prod signing secrets are required for prod platform upload."
+            exit 1
+          fi
+
+          published_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          body="$(mktemp)"
+          status="$(
+            curl -sS -o "${body}" -w "%{http_code}" -X POST \
+              -H "Authorization: Bearer ${BEPLY_CI_TOKEN}" \
+              -F "file=@${ZIP_PATH}" \
+              -F "sourceRepoFullName=${{ github.repository }}" \
+              -F "sourceBranch=main" \
+              -F "sourceReleaseTag=${GITHUB_REF_NAME}" \
+              -F "sourceReleaseUrl=https://github.com/${{ github.repository }}/releases/tag/${GITHUB_REF_NAME}" \
+              -F "sourcePublishedAt=${published_at}" \
+              -F "artifactSignature=${{ steps.prod_attestation.outputs.artifact_signature }}" \
+              -F "artifactSignatureKeyId=${{ steps.prod_attestation.outputs.artifact_signature_key_id }}" \
+              -F "sbomUrl=${{ steps.prod_attestation.outputs.sbom_url }}" \
+              -F "sbomChecksum=${{ steps.prod_attestation.outputs.sbom_checksum }}" \
+              -F "artifactPolicyVersion=${{ steps.prod_attestation.outputs.artifact_policy_version }}" \
+              "${BEPLY_API_URL}/api/v1/plugins/release"
+          )"
+          cat "${body}"
+          if [ "${status}" -ge 200 ] && [ "${status}" -lt 300 ]; then
+            exit 0
+          fi
+          echo "::error::Platform upload failed with HTTP ${status}"
+          exit 1
+
+      - name: Confirm disabled Beply Platform upload
+        if: vars.BEPLY_PROD_PANEL_PUBLISH_ENABLED != 'true'
+        run: echo "Production panel publication is disabled; the GitHub release remains available."
