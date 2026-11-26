@@ -26,6 +26,7 @@
     "scripts/ci/read-ci-dependencies.mjs",
     "scripts/ci/test_ci_dependencies.mjs",
     "scripts/ci/test_ci_dependencies_workflow.py",
+    "scripts/ci/test_tests_secrets_isolation.py",
     "scripts/ci/test_tools_contract.mjs",
     "scripts/ci/test_template_pin_contract.py",
     "scripts/ci/build_plugin_zip.py",

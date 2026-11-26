@@ -18,69 +18,15 @@ permissions:
 jobs:
   verify_tests:
     name: Verify Tests Workflow
-    timeout-minutes: 50
-    runs-on: ${{ vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
-    steps:
-      - name: Wait for exact Tests workflow
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-          TARGET_SHA: ${{ github.sha }}
-          TARGET_REF_NAME: ${{ github.ref_name }}
-          TARGET_EVENT: ${{ github.event_name }}
-          CURRENT_RUN_ID: ${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import json
-          import os
-          import sys
-          import time
-          import urllib.request
-
-          repository = os.environ["REPOSITORY"]
-          target_sha = os.environ["TARGET_SHA"]
-          target_ref = os.environ["TARGET_REF_NAME"]
-          target_event = os.environ["TARGET_EVENT"]
-          current_run_id = int(os.environ["CURRENT_RUN_ID"])
-          token = os.environ["GITHUB_TOKEN"]
-          url = f"https://api.github.com/repos/{repository}/actions/runs?head_sha={target_sha}&per_page=100"
-          deadline = time.time() + 49 * 60
-
-          def runs():
-              request = urllib.request.Request(url, headers={
-                  "Authorization": f"Bearer {token}",
-                  "Accept": "application/vnd.github+json",
-                  "User-Agent": "beply-plugin-immutable-release-gate",
-              })
-              with urllib.request.urlopen(request) as response:
-                  payload = json.load(response)
-              return [
-                  run for run in payload.get("workflow_runs", [])
-                  if run.get("name") == "Tests"
-                  and int(run.get("id", 0)) != current_run_id
-                  and run.get("head_branch") == target_ref
-                  and run.get("event") == target_event
-              ]
-
-          while time.time() < deadline:
-              matching = runs()
-              if any(
-                  run.get("status") == "completed"
-                  and run.get("conclusion") == "success"
-                  for run in matching
-              ):
-                  sys.exit(0)
-              if matching and all(run.get("status") == "completed" for run in matching):
-                  print("Exact Tests workflow did not succeed", file=sys.stderr)
-                  sys.exit(1)
-              time.sleep(15)
-          print("Timed out waiting for exact Tests workflow", file=sys.stderr)
-          sys.exit(1)
-          PY
+    uses: ./.github/workflows/reusable-release-tag-gate.yml
+    with:
+      expected_repo: beply-es/BeplyPluginTemplate
+      expected_jobs: '["Quality Contract","Lint FS v2026.3","Lint FS v2026.2","Unit FS v2026.3 PHP 8.2","Unit FS v2026.2 PHP 8.2","Runtime FS v2026.3 PHP 8.2","Runtime FS v2026.2 PHP 8.2","E2E FS v2026.3","E2E FS v2026.2","Upload Coverage"]'
+      optional_jobs: '["PHP 8.4 Compatibility"]'
 
   docs_release_audit:
     name: Documentation Release Audit
+    if: github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v')
     needs: verify_tests
     timeout-minutes: 12
     runs-on: ${{ vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
@@ -93,6 +39,7 @@ jobs:
       - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: "24"
+          package-manager-cache: false
 
       - name: AI docs impact audit for immutable release tag
         env:
@@ -103,6 +50,7 @@ jobs:
 
   publish_immutable_candidate:
     name: Publish One Candidate And Validate Same Bytes In DEV
+    if: github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v')
     needs: docs_release_audit
     uses: ./.github/workflows/reusable-immutable-plugin-candidate.yml
     with:

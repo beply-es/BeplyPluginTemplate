@@ -142,6 +142,7 @@ jobs:
       - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: "24"
+          package-manager-cache: false
 
       - name: Parse and validate plugin identity
         id: ini
@@ -150,11 +151,14 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
+          export LC_ALL=C
           parse_field() {
-            grep -E "^$1\\s*=" facturascripts.ini | head -1 | sed 's/^[^=]*=[ ]*//' | tr -d '"\r' | xargs
+            grep -E "^$1\\s*=" facturascripts.ini | head -1 | sed -e 's/^[^=]*=[[:space:]]*//' -e 's/[[:space:]]*$//' | tr -d "\"'\r"
           }
           NAME="$(parse_field name)"
           VERSION="$(parse_field version)"
+          [[ "${NAME}" =~ ^[A-Za-z][A-Za-z0-9_]{0,63}$ ]] || { echo "::error::invalid plugin name in facturascripts.ini"; exit 1; }
+          [[ "${VERSION}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::invalid plugin version in facturascripts.ini"; exit 1; }
           test "${RELEASE_TAG}" = "v${VERSION}" || { echo "::error::tag/version mismatch"; exit 1; }
           {
             echo "name=${NAME}"
@@ -280,6 +284,12 @@ jobs:
           SOURCE_SHA: ${{ inputs.expected_commit_sha }}
           RELEASE_TRACK: ${{ inputs.release_track }}
           HAS_ATTESTATION: ${{ steps.attestation.outputs.has_attestation }}
+          ARTIFACT_CHECKSUM: ${{ steps.attestation.outputs.artifact_checksum }}
+          ARTIFACT_SIGNATURE: ${{ steps.attestation.outputs.artifact_signature }}
+          ARTIFACT_SIGNATURE_KEY_ID: ${{ steps.attestation.outputs.artifact_signature_key_id }}
+          SBOM_URL: ${{ steps.attestation.outputs.sbom_url }}
+          SBOM_CHECKSUM: ${{ steps.attestation.outputs.sbom_checksum }}
+          ARTIFACT_POLICY_VERSION: ${{ steps.attestation.outputs.artifact_policy_version }}
           SOURCE_REPO_FULL_NAME: ${{ inputs.source_repo_full_name || github.repository }}
           SOURCE_RELEASE_URL: ${{ inputs.source_release_url || format('https://github.com/{0}/releases/tag/{1}', github.repository, inputs.release_tag) }}
           SOURCE_PUBLISHED_AT: ${{ steps.release_metadata.outputs.source_published_at }}
@@ -287,7 +297,7 @@ jobs:
           set -euo pipefail
           test -n "${BEPLY_CI_TOKEN}" || { echo "::error::BEPLY_PROD_CI_TOKEN is required"; exit 1; }
           ZIP="/tmp/${PLUGIN_NAME}-v${PLUGIN_VERSION}.zip"
-          test "${{ steps.attestation.outputs.artifact_checksum }}" = "${CHECKSUM}" || { echo "::error::PROD attestation checksum drift"; exit 1; }
+          test "${ARTIFACT_CHECKSUM}" = "${CHECKSUM}" || { echo "::error::PROD attestation checksum drift"; exit 1; }
           CURL_FIELDS=(
             -F "file=@${ZIP}"
             -F "sourceRepoFullName=${SOURCE_REPO_FULL_NAME}"
@@ -298,11 +308,11 @@ jobs:
           )
           if [ "${HAS_ATTESTATION}" = "true" ]; then
             CURL_FIELDS+=(
-              -F "artifactSignature=${{ steps.attestation.outputs.artifact_signature }}"
-              -F "artifactSignatureKeyId=${{ steps.attestation.outputs.artifact_signature_key_id }}"
-              -F "sbomUrl=${{ steps.attestation.outputs.sbom_url }}"
-              -F "sbomChecksum=${{ steps.attestation.outputs.sbom_checksum }}"
-              -F "artifactPolicyVersion=${{ steps.attestation.outputs.artifact_policy_version }}"
+              -F "artifactSignature=${ARTIFACT_SIGNATURE}"
+              -F "artifactSignatureKeyId=${ARTIFACT_SIGNATURE_KEY_ID}"
+              -F "sbomUrl=${SBOM_URL}"
+              -F "sbomChecksum=${SBOM_CHECKSUM}"
+              -F "artifactPolicyVersion=${ARTIFACT_POLICY_VERSION}"
             )
           fi
           RESPONSE="$(curl -sS -w '\n%{http_code}' -X POST \
