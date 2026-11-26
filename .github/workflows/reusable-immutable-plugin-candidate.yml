@@ -160,11 +160,20 @@ jobs:
           [[ "${CALLER_JOB_KEY}" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]] || { echo "::error::caller_job_key is invalid"; exit 1; }
 
       - name: Verify release tag peels to the run commit
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # New publications require lightweight tags. Historical annotated
           # releases may still be verified by a provenance-only dispatch.
-          git -C plugin fetch --force --no-tags origin "+refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          # Explicit per-command auth keeps persist-credentials: false on checkout
+          # while supporting private plugin repositories (e.g. BeplyCitas).
+          if [ -n "${GITHUB_ACTIONS:-}" ] && [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::GH_TOKEN is required to fetch release tag from origin"
+            exit 1
+          fi
+          AUTH_HEADER="$(printf 'x-access-token:%s' "${GH_TOKEN:-}" | base64 | tr -d '\n')"
+          git -C plugin -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${AUTH_HEADER}" fetch --force --no-tags origin "+refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
           if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
             test "$(git -C plugin cat-file -t "refs/tags/${GITHUB_REF_NAME}")" = "commit" || {
               echo "::error::new releases require a lightweight tag (git tag vX.Y COMMIT, without -a or -s); do not retag an existing release"
