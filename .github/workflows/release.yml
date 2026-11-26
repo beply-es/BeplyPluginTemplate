@@ -21,7 +21,7 @@ jobs:
     uses: ./.github/workflows/reusable-release-tag-gate.yml
     with:
       expected_repo: beply-es/BeplyPluginTemplate
-      expected_jobs: '["Quality Contract","Lint FS v2026.3","Lint FS v2026.2","Unit FS v2026.3 PHP 8.2","Unit FS v2026.2 PHP 8.2","Runtime FS v2026.3 PHP 8.2","Runtime FS v2026.2 PHP 8.2","E2E FS v2026.3","E2E FS v2026.2"]'
+      expected_jobs: '["Quality Contract","Lint FS v2026.3","Lint FS v2026.2","Unit FS v2026.3 PHP 8.2","Unit FS v2026.2 PHP 8.2","Runtime FS v2026.3 PHP 8.2","Runtime FS v2026.2 PHP 8.2","E2E FS v2026.3","E2E FS v2026.2","Upload Coverage"]'
       optional_jobs: '["PHP 8.4 Compatibility"]'
 
   docs_release_audit:
