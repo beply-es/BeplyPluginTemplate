@@ -10,7 +10,7 @@ WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 # Matches network-touching git invocations (including command substitutions $(git ...),
 # shell conditionals like `if git ls-remote ...`, and flags like -C/-c before subcommand).
 GIT_NETWORK_CMD_RE = re.compile(
-    r"(?:^|[;&|(`{\s]|\$\()git\b[^\n;&|)`}]*\b(fetch|pull|push|ls-remote|clone)\b",
+    r"(?:^|[;&|(`{\s]|\$\()git\b[^\n;&|`]*?\b(fetch|pull|push|ls-remote|clone)\b",
 )
 
 EXPLICIT_GIT_AUTH_RE = re.compile(
@@ -246,6 +246,83 @@ class WorkflowCheckoutCredentialsContractTest(unittest.TestCase):
         }
         violations = find_workflow_credential_violations("mutant-m6-if.yml", wf)
         self.assertEqual(1, len(violations))
+        self.assertIn("network git command without explicit per-command auth", violations[0])
+
+    def test_mutant_c4_braces_and_parens_in_git_options_are_detected(self) -> None:
+        cases = [
+            (
+                "mutant-c4-var-dir.yml",
+                {
+                    "jobs": {
+                        "release": {
+                            "steps": [
+                                {
+                                    "name": "Fetch with var dir",
+                                    "run": 'git -C "${DIR}" fetch --force --no-tags origin "+refs/tags/v1.0:refs/tags/v1.0"',
+                                }
+                            ]
+                        }
+                    }
+                },
+            ),
+            (
+                "mutant-c4-cmdsub-dir.yml",
+                {
+                    "jobs": {
+                        "release": {
+                            "steps": [
+                                {
+                                    "name": "Fetch with cmdsub dir",
+                                    "run": 'git -C "$(pwd)/p" fetch --force --no-tags origin "+refs/tags/v1.0:refs/tags/v1.0"',
+                                }
+                            ]
+                        }
+                    }
+                },
+            ),
+            (
+                "mutant-c4-extraheader-missing-token.yml",
+                {
+                    "jobs": {
+                        "release": {
+                            "steps": [
+                                {
+                                    "name": "Fetch with extraheader but no GH_TOKEN env",
+                                    "run": (
+                                        'git -C plugin '
+                                        '-c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${AUTH_HEADER}" '
+                                        'fetch --force --no-tags origin "+refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"'
+                                    ),
+                                }
+                            ]
+                        }
+                    }
+                },
+            ),
+        ]
+        for wf_name, wf in cases:
+            with self.subTest(wf_name=wf_name):
+                violations = find_workflow_credential_violations(wf_name, wf)
+                self.assertEqual(1, len(violations), f"Expected 1 violation for {wf_name}, got {violations!r}")
+                self.assertIn("network git command without explicit per-command auth", violations[0])
+
+    def test_mutant_c4_real_workflow_step_without_gh_token_is_rejected(self) -> None:
+        wf_path = WORKFLOWS_DIR / "reusable-immutable-plugin-candidate.yml"
+        data = yaml.safe_load(wf_path.read_text(encoding="utf-8"))
+        steps = data["jobs"]["source_provenance"]["steps"]
+        target_step = next(
+            step for step in steps if step.get("name") == "Verify release tag peels to the run commit"
+        )
+        self.assertIn("GH_TOKEN", target_step.get("env") or {})
+        target_step["env"] = {k: v for k, v in target_step["env"].items() if k != "GH_TOKEN"}
+
+        violations = find_workflow_credential_violations(wf_path.name, data)
+        self.assertEqual(
+            1,
+            len(violations),
+            f"Removing GH_TOKEN from real fetch step must trigger a violation, got {violations!r}",
+        )
+        self.assertIn("Verify release tag peels to the run commit", violations[0])
         self.assertIn("network git command without explicit per-command auth", violations[0])
 
 
