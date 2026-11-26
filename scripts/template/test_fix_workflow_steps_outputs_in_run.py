@@ -234,6 +234,78 @@ jobs:
             )
             self.assertEqual(expected, probe.stdout)
 
+    def test_c2_single_quotes_inside_double_quoted_command_substitution(self) -> None:
+        workflow = """name: Deploy
+on: push
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compute slug
+        run: |
+          slug="$(printf '%s' '${{ steps.x.outputs.x }}-arm64')"
+          echo "$slug"
+"""
+        transformed = gen.transform_workflow_text(workflow)
+        data = yaml.safe_load(transformed)
+        step = data['jobs']['deploy']['steps'][0]
+
+        self.assertEqual('${{ steps.x.outputs.x }}', step['env']['STEP_X_X'])
+        self.assertIn('\'\'"${STEP_X_X}"\'-arm64\'', step['run'])
+
+        for val, expected in (
+            ('2.0', '2.0-arm64'),
+            ('$(id)', '$(id)-arm64'),
+        ):
+            probe = subprocess.run(
+                ['bash', '-euo', 'pipefail', '-c', step['run']],
+                env={'STEP_X_X': val},
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(expected, probe.stdout.strip())
+
+    def test_c4_post_transform_sweep_catches_multiline_double_quoted_yaml_and_needs_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp) / 'MultilineYamlRepo'
+            wf_dir = repo_dir / '.github' / 'workflows'
+            wf_dir.mkdir(parents=True)
+            wf_path = wf_dir / 'canary.yml'
+            original = (
+                'name: Canary\n'
+                'on: push\n'
+                'jobs:\n'
+                '  canary:\n'
+                '    runs-on: ubuntu-latest\n'
+                '    steps:\n'
+                '      - name: Split scalar\n'
+                '        run: "echo ${{ steps.foo.outputs.\n'
+                '          bar }}"\n'
+                '      - name: Needs output\n'
+                '        run: echo "${{ needs.build.outputs.tag }}"\n'
+            )
+            wf_path.write_text(original, encoding='utf-8')
+
+            res = gen.process_repository(repo_dir, apply=True, repo_name='MultilineYamlRepo')
+            self.assertFalse(res.eligible_for_batch)
+            self.assertFalse(res.applied)
+            self.assertEqual([], res.changed_files)
+            self.assertEqual(original, wf_path.read_text(encoding='utf-8'))
+            self.assertTrue(
+                any(w['kind'] == 'post_transform_residual_run' for w in res.warnings),
+                f'Expected post_transform_residual_run warning, got {res.warnings}',
+            )
+
+            cli = subprocess.run(
+                [sys.executable, '-B', str(SCRIPT_DIR / 'fix_workflow_steps_outputs_in_run.py'),
+                 '--repo', str(repo_dir), '--dry-run'],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(0, cli.returncode)
+            self.assertIn('post_transform_residual_run', cli.stdout)
+
     def test_c3_fail_closed_on_compound_expr_and_with_script_and_contract_rejects_with_script(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_dir = Path(tmp) / 'UnsupportedRepo'

@@ -46,6 +46,10 @@ STEPS_OUTPUT_EXPR_RE = re.compile(
 ANY_STEPS_OUTPUT_EXPR_RE = re.compile(
     r'\$\{\{[^}]*steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+[^}]*\}\}'
 )
+POST_TRANSFORM_RESIDUAL_RE = re.compile(
+    r'\$\{\{[^}]*\b(?:steps|needs)\.[^}]*\.outputs\b[^}]*\}\}',
+    re.DOTALL,
+)
 
 CANONICAL_ENV_NAMES: dict[tuple[str, str], str] = {
     ('ini', 'name'): 'PLUGIN_NAME',
@@ -102,7 +106,7 @@ except ImportError:  # pragma: no cover - fallback for runners without PyYAML
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS_DIR = ROOT / '.github' / 'workflows'
-STEPS_OUTPUTS_RE = re.compile(r'\\$\\{\\{[^}]*steps\\.[^}]+\\.outputs\\.[^}]+\\}\\}')
+STEPS_OUTPUTS_RE = re.compile(r'\\$\\{\\{[^}]*\\b(?:steps|needs)\\.[^}]+\\.outputs\\b[^}]*\\}\\}', re.DOTALL)
 
 
 def _find_with_pyyaml(workflow_text: str, workflow_name: str) -> list[str]:
@@ -280,24 +284,51 @@ def _canonical_env_name(step_id: str, output_name: str) -> str:
 
 
 def _quote_context(line: str, match_start: int) -> str:
-    """Return shell quote context at match_start: 'single', 'double', or 'none'."""
-    in_single = False
-    in_double = False
+    """Return shell quote context at match_start: 'single', 'double', or 'none'.
+
+    Opens a fresh quote frame inside every `$(...)` command substitution so
+    single quotes nested inside `"$(... '...' ...)"` are tracked accurately.
+    """
+    stack: list[dict[str, Any]] = [{'single': False, 'double': False, 'paren_depth': 0}]
     escaped = False
-    for ch in line[:match_start]:
+    i = 0
+    prefix = line[:match_start]
+    while i < len(prefix):
+        ch = prefix[i]
+        frame = stack[-1]
         if escaped:
             escaped = False
+            i += 1
             continue
-        if ch == '\\' and not in_single:
+        if ch == '\\' and not frame['single']:
             escaped = True
+            i += 1
             continue
-        if ch == "'" and not in_double:
-            in_single = not in_single
-        elif ch == '"' and not in_single:
-            in_double = not in_double
-    if in_single:
+        if not frame['single'] and prefix[i : i + 2] == '$(':
+            stack.append({'single': False, 'double': False, 'paren_depth': 1})
+            i += 2
+            continue
+        if not frame['single'] and not frame['double'] and len(stack) > 1:
+            if ch == '(':
+                frame['paren_depth'] += 1
+                i += 1
+                continue
+            if ch == ')':
+                frame['paren_depth'] -= 1
+                if frame['paren_depth'] == 0:
+                    stack.pop()
+                i += 1
+                continue
+        if ch == "'" and not frame['double']:
+            frame['single'] = not frame['single']
+        elif ch == '"' and not frame['single']:
+            frame['double'] = not frame['double']
+        i += 1
+
+    top = stack[-1]
+    if top['single']:
         return 'single'
-    if in_double:
+    if top['double']:
         return 'double'
     return 'none'
 
@@ -544,7 +575,50 @@ def analyze_and_transform_workflow_text(
         lines[insert_line:insert_line] = add_lines
 
     result = ''.join(lines)
-    yaml.safe_load(result)
+    parsed_after = yaml.safe_load(result)
+
+    # C4: Post-transformation sweep for any remaining multiline/quoted (steps|needs).*.outputs
+    # in run: or with.script (e.g. double-quoted YAML scalars split across lines).
+    if isinstance(parsed_after, dict):
+        jobs_after = parsed_after.get('jobs') or {}
+        if isinstance(jobs_after, dict):
+            existing_keys = {
+                (w['workflow'], w['job'], w['step'], tuple(w['expressions']))
+                for w in warnings
+            }
+            for j_id, j_obj in jobs_after.items():
+                if not isinstance(j_obj, dict):
+                    continue
+                for s_idx, s_obj in enumerate(j_obj.get('steps') or []):
+                    if not isinstance(s_obj, dict):
+                        continue
+                    s_label = s_obj.get('name') or f'step[{s_idx}]'
+                    for field_name, val in (
+                        ('run', s_obj.get('run')),
+                        (
+                            'with.script',
+                            s_obj.get('with', {}).get('script')
+                            if isinstance(s_obj.get('with'), dict)
+                            else None,
+                        ),
+                    ):
+                        if not isinstance(val, str):
+                            continue
+                        residuals = sorted(set(POST_TRANSFORM_RESIDUAL_RE.findall(val)))
+                        if residuals:
+                            sig = (workflow_name, j_id, s_label, tuple(residuals))
+                            if sig not in existing_keys:
+                                existing_keys.add(sig)
+                                warnings.append(
+                                    {
+                                        'kind': f'post_transform_residual_{field_name.replace(".", "_")}',
+                                        'workflow': workflow_name,
+                                        'job': j_id,
+                                        'step': s_label,
+                                        'expressions': residuals,
+                                    }
+                                )
+
     return result, warnings
 
 
