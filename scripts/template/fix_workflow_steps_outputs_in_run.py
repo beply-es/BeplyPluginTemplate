@@ -3,8 +3,15 @@
 
 Design goals:
 - Surgical, line-preserving edits using PyYAML's compose marks (untouched YAML stays byte-identical).
-- Deterministic env variable names, reusing existing env mappings in the same step.
-- Injects scripts/ci/test_workflow_no_steps_outputs_in_run.py and wires it in tests.yml if needed.
+- Respects original shell quoting context (C1/C2):
+  - Unquoted: ${VAR} (preserves word-splitting for *targets lists; shell never executes $(...)).
+  - Inside double quotes ("..."): ${VAR} (keeps surrounding double quotes).
+  - Inside single quotes ('...'): closes & reopens single quotes as '"${VAR}"' (or "${VAR}" if bare).
+- Fail-closed on unsupported patterns (C3): never rewrites compound expressions
+  (${{ steps.a.outputs.x || ... }}) or with.script (github-script / ssh-action); reports them
+  explicitly in warnings and marks eligible_for_batch=False.
+- Injects scripts/ci/test_workflow_no_steps_outputs_in_run.py (checking both run: and with.script)
+  and wires it in tests.yml if needed.
 - Computes a normalized diff SHA-256 (replacing repo-specific names with <REPO>) for batch auditing.
 - Supports --dry-run (default) and --apply; guaranteed idempotent (2nd pass diff = 0 bytes).
 """
@@ -24,8 +31,20 @@ from typing import Any
 import yaml
 
 
+class InvalidWorkflowYamlError(RuntimeError):
+    """Raised when a workflow YAML file cannot be parsed cleanly."""
+
+    def __init__(self, workflow_path: str, detail: str) -> None:
+        self.workflow_path = workflow_path
+        self.detail = detail
+        super().__init__(f'Invalid YAML in {workflow_path}: {detail}')
+
+
 STEPS_OUTPUT_EXPR_RE = re.compile(
     r'\$\{\{\s*steps\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)\s*\}\}'
+)
+ANY_STEPS_OUTPUT_EXPR_RE = re.compile(
+    r'\$\{\{[^}]*steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+[^}]*\}\}'
 )
 
 CANONICAL_ENV_NAMES: dict[tuple[str, str], str] = {
@@ -67,7 +86,7 @@ CANONICAL_ENV_NAMES: dict[tuple[str, str], str] = {
 CONTRACT_TEST_REL_PATH = Path('scripts/ci/test_workflow_no_steps_outputs_in_run.py')
 
 CONTRACT_TEST_SOURCE = '''#!/usr/bin/env python3
-"""Contract test: reject ${{ steps.*.outputs.* }} interpolation inside workflow run: blocks."""
+"""Contract test: reject ${{ steps.*.outputs.* }} interpolation inside run: and with.script blocks."""
 
 from __future__ import annotations
 
@@ -83,7 +102,7 @@ except ImportError:  # pragma: no cover - fallback for runners without PyYAML
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS_DIR = ROOT / '.github' / 'workflows'
-STEPS_OUTPUTS_RE = re.compile(r'\\$\\{\\{\\s*steps\\.[^}]+\\.outputs\\.[^}]+\\}\\}')
+STEPS_OUTPUTS_RE = re.compile(r'\\$\\{\\{[^}]*steps\\.[^}]+\\.outputs\\.[^}]+\\}\\}')
 
 
 def _find_with_pyyaml(workflow_text: str, workflow_name: str) -> list[str]:
@@ -105,15 +124,23 @@ def _find_with_pyyaml(workflow_text: str, workflow_name: str) -> list[str]:
         for idx, step in enumerate(steps):
             if not isinstance(step, dict):
                 continue
+            step_label = step.get('name') or f'step[{idx}]'
             run_script = step.get('run')
-            if not isinstance(run_script, str):
-                continue
-            matches = STEPS_OUTPUTS_RE.findall(run_script)
-            if matches:
-                step_label = step.get('name') or f'step[{idx}]'
-                violations.append(
-                    f'{workflow_name} :: job {job_id} :: {step_label!r} -> {sorted(set(matches))}'
-                )
+            if isinstance(run_script, str):
+                matches = STEPS_OUTPUTS_RE.findall(run_script)
+                if matches:
+                    violations.append(
+                        f'{workflow_name} :: job {job_id} :: {step_label!r} (run) -> {sorted(set(matches))}'
+                    )
+            with_cfg = step.get('with')
+            if isinstance(with_cfg, dict):
+                script_val = with_cfg.get('script')
+                if isinstance(script_val, str):
+                    matches = STEPS_OUTPUTS_RE.findall(script_val)
+                    if matches:
+                        violations.append(
+                            f'{workflow_name} :: job {job_id} :: {step_label!r} (with.script) -> {sorted(set(matches))}'
+                        )
     return violations
 
 
@@ -123,16 +150,19 @@ def _find_fallback(workflow_text: str, workflow_name: str) -> list[str]:
     i = 0
     while i < len(lines):
         line = lines[i]
-        m = re.match(r'^(\\s*(?:-\\s+)?)run\\s*:(.*)$', line)
+        m = re.match(r'^(\\s*(?:-\\s+)?)(run|script)\\s*:(.*)$', line)
         if not m:
             i += 1
             continue
         key_indent = len(m.group(1))
-        rest = m.group(2).strip()
+        key_name = m.group(2)
+        rest = m.group(3).strip()
         if rest and not re.match(r'^[|>][0-9+-]*$', rest):
             matches = STEPS_OUTPUTS_RE.findall(rest)
             if matches:
-                violations.append(f'{workflow_name} :: line {i + 1} -> {sorted(set(matches))}')
+                violations.append(
+                    f'{workflow_name} :: line {i + 1} ({key_name}) -> {sorted(set(matches))}'
+                )
             i += 1
             continue
         block_lines: list[str] = []
@@ -150,13 +180,15 @@ def _find_fallback(workflow_text: str, workflow_name: str) -> list[str]:
             j += 1
         matches = STEPS_OUTPUTS_RE.findall('\\n'.join(block_lines))
         if matches:
-            violations.append(f'{workflow_name} :: line {i + 1} -> {sorted(set(matches))}')
+            violations.append(
+                f'{workflow_name} :: line {i + 1} ({key_name}) -> {sorted(set(matches))}'
+            )
         i = j
     return violations
 
 
 def find_steps_outputs_in_run(workflow_text: str, workflow_name: str = '<memory>') -> list[str]:
-    """Return violations where ${{ steps.*.outputs.* }} is interpolated inside a run: block."""
+    """Return violations where ${{ steps.*.outputs.* }} is interpolated inside run: or with.script."""
     if yaml is not None:
         return _find_with_pyyaml(workflow_text, workflow_name)
     return _find_fallback(workflow_text, workflow_name)
@@ -177,6 +209,25 @@ jobs:
         violations = find_steps_outputs_in_run(unsafe_workflow, 'unsafe.yml')
         self.assertEqual(1, len(violations))
         self.assertIn('steps.ini.outputs.version', violations[0])
+
+    def test_detects_unsafe_interpolation_in_with_script(self) -> None:
+        unsafe_script_workflow = """
+name: Unsafe Script
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bad github-script
+        uses: actions/github-script@v7
+        with:
+          script: |
+            console.log("${{ steps.ini.outputs.name }}")
+"""
+        violations = find_steps_outputs_in_run(unsafe_script_workflow, 'unsafe-script.yml')
+        self.assertEqual(1, len(violations))
+        self.assertIn('with.script', violations[0])
+        self.assertIn('steps.ini.outputs.name', violations[0])
 
     def test_allows_steps_outputs_passed_via_env(self) -> None:
         safe_workflow = """
@@ -208,7 +259,7 @@ jobs:
         self.assertEqual(
             [],
             all_violations,
-            'Workflows must pass ${{ steps.*.outputs.* }} via env: instead of interpolating in run::\\n'
+            'Workflows must pass ${{ steps.*.outputs.* }} via env: instead of interpolating in run:/with.script:\\n'
             + '\\n'.join(all_violations),
         )
 
@@ -228,8 +279,8 @@ def _canonical_env_name(step_id: str, output_name: str) -> str:
     return f'STEP_{clean_step}_{clean_out}'
 
 
-def _is_inside_double_quotes(line: str, match_start: int) -> bool:
-    """Return True if match_start sits inside an unescaped double-quoted shell string."""
+def _quote_context(line: str, match_start: int) -> str:
+    """Return shell quote context at match_start: 'single', 'double', or 'none'."""
     in_single = False
     in_double = False
     escaped = False
@@ -244,7 +295,11 @@ def _is_inside_double_quotes(line: str, match_start: int) -> bool:
             in_single = not in_single
         elif ch == '"' and not in_single:
             in_double = not in_double
-    return in_double
+    if in_single:
+        return 'single'
+    if in_double:
+        return 'double'
+    return 'none'
 
 
 def _is_directly_single_quoted(line: str, start: int, end: int) -> bool:
@@ -252,24 +307,33 @@ def _is_directly_single_quoted(line: str, start: int, end: int) -> bool:
 
 
 def _replace_in_run_line(line: str, mapping: dict[tuple[str, str], str]) -> str:
-    """Replace all ${{ steps.X.outputs.Y }} in a single run: line with safe quoted env refs."""
+    """Replace all simple ${{ steps.X.outputs.Y }} in a run: line respecting original quotes.
+
+    - Unquoted -> ${VAR} (preserves word-splitting for *targets lists; shell never executes $(...)).
+    - Inside double quotes -> ${VAR} (keeps surrounding double quotes).
+    - Directly single-quoted ('${{ ... }}') -> "${VAR}".
+    - Embedded inside single quotes ('prefix-${{ ... }}-suffix') -> 'prefix-'"${VAR}"'-suffix'.
+    """
     out_parts: list[str] = []
     pos = 0
     for m in STEPS_OUTPUT_EXPR_RE.finditer(line):
         key = (m.group(1), m.group(2))
         var_name = mapping[key]
         start, end = m.span()
-        if _is_directly_single_quoted(line, start, end):
-            out_parts.append(line[pos : start - 1])
-            out_parts.append(f'"${{{var_name}}}"')
-            pos = end + 1
-        elif _is_inside_double_quotes(line, start):
+        ctx = _quote_context(line, start)
+        if ctx == 'single':
+            if _is_directly_single_quoted(line, start, end):
+                out_parts.append(line[pos : start - 1])
+                out_parts.append(f'"${{{var_name}}}"')
+                pos = end + 1
+            else:
+                out_parts.append(line[pos:start])
+                out_parts.append(f'\'"${{{var_name}}}"\'')
+                pos = end
+        else:
+            # Both 'double' and 'none' substitute ${VAR} without adding extra double quotes.
             out_parts.append(line[pos:start])
             out_parts.append(f'${{{var_name}}}')
-            pos = end
-        else:
-            out_parts.append(line[pos:start])
-            out_parts.append(f'"${{{var_name}}}"')
             pos = end
     out_parts.append(line[pos:])
     return ''.join(out_parts)
@@ -309,36 +373,86 @@ def _normalize_expr(expr: str) -> tuple[str, str] | None:
     return (m.group(1), m.group(2))
 
 
-def transform_workflow_text(text: str) -> str:
-    """Move all ${{ steps.*.outputs.* }} inside run: blocks into step env: without reformatting."""
-    root = yaml.compose(text)
+def analyze_and_transform_workflow_text(
+    text: str, workflow_name: str = '<memory>'
+) -> tuple[str, list[dict[str, Any]]]:
+    """Move supported ${{ steps.*.outputs.* }} from run: into env:; report unsupported ones.
+
+    Returns (transformed_text, warnings). Steps with compound expressions or with.script
+    interpolations are never rewritten and are recorded in warnings so callers fail closed.
+    """
+    warnings: list[dict[str, Any]] = []
+    try:
+        root = yaml.compose(text)
+    except yaml.YAMLError as exc:
+        raise InvalidWorkflowYamlError(workflow_name, str(exc).splitlines()[0]) from exc
     if not isinstance(root, yaml.MappingNode):
-        return text
+        return text, warnings
 
     jobs_pair = _get_mapping_pair(root, 'jobs')
     if not jobs_pair or not isinstance(jobs_pair[1], yaml.MappingNode):
-        return text
+        return text, warnings
 
     lines = text.splitlines(keepends=True)
-    # Collect edits as (kind, line_idx, payload) applied bottom-up so line indices stay valid.
-    # For run lines we mutate in-place on `lines`; for env insertions we record (insert_at_line, new_lines).
     insertions: list[tuple[int, list[str]]] = []
 
-    for _, job_node in jobs_pair[1].value:
+    for job_k, job_node in jobs_pair[1].value:
+        job_id = job_k.value if isinstance(job_k, yaml.ScalarNode) else '<job>'
         if not isinstance(job_node, yaml.MappingNode):
             continue
         steps_pair = _get_mapping_pair(job_node, 'steps')
         if not steps_pair or not isinstance(steps_pair[1], yaml.SequenceNode):
             continue
 
-        for step_node in steps_pair[1].value:
+        for step_idx, step_node in enumerate(steps_pair[1].value):
             if not isinstance(step_node, yaml.MappingNode):
                 continue
+            name_pair = _get_mapping_pair(step_node, 'name')
+            step_label = (
+                name_pair[1].value
+                if name_pair and isinstance(name_pair[1], yaml.ScalarNode)
+                else f'step[{step_idx}]'
+            )
+
+            # C3: Fail-closed on with.script (github-script, ssh-action, etc.)
+            with_pair = _get_mapping_pair(step_node, 'with')
+            if with_pair and isinstance(with_pair[1], yaml.MappingNode):
+                script_pair = _get_mapping_pair(with_pair[1], 'script')
+                if script_pair and isinstance(script_pair[1], yaml.ScalarNode):
+                    script_matches = ANY_STEPS_OUTPUT_EXPR_RE.findall(script_pair[1].value)
+                    if script_matches:
+                        warnings.append(
+                            {
+                                'kind': 'unsupported_with_script',
+                                'workflow': workflow_name,
+                                'job': job_id,
+                                'step': step_label,
+                                'expressions': sorted(set(script_matches)),
+                            }
+                        )
+
             run_pair = _get_mapping_pair(step_node, 'run')
             if not run_pair:
                 continue
             run_k, run_v = run_pair
             if not isinstance(run_v, yaml.ScalarNode):
+                continue
+
+            # C3: Fail-closed on compound expressions inside run:
+            all_any_matches = ANY_STEPS_OUTPUT_EXPR_RE.findall(run_v.value)
+            unsupported_exprs = [
+                expr for expr in all_any_matches if not STEPS_OUTPUT_EXPR_RE.fullmatch(expr)
+            ]
+            if unsupported_exprs:
+                warnings.append(
+                    {
+                        'kind': 'unsupported_compound_expression',
+                        'workflow': workflow_name,
+                        'job': job_id,
+                        'step': step_label,
+                        'expressions': sorted(set(unsupported_exprs)),
+                    }
+                )
                 continue
 
             pairs_in_order: list[tuple[str, str]] = []
@@ -389,7 +503,6 @@ def transform_workflow_text(text: str) -> str:
                 newline = '\n' if raw.endswith('\n') else ''
                 body = raw[:-1] if newline else raw
                 if idx == run_k.start_mark.line:
-                    # Inline `run: ...` on the same line as the key
                     colon_pos = body.find(':', run_k.start_mark.column)
                     prefix = body[: colon_pos + 1]
                     rhs = body[colon_pos + 1 :]
@@ -409,7 +522,6 @@ def transform_workflow_text(text: str) -> str:
                     key_col = run_k.start_mark.column
                     run_line_idx = run_k.start_mark.line
                     run_line_text = lines[run_line_idx]
-                    # Handle `- run: ...` where run is the first key in the step sequence item
                     dash_prefix_match = re.match(r'^(\s*-\s+)run\s*:', run_line_text)
                     if dash_prefix_match:
                         dash_prefix = dash_prefix_match.group(1)
@@ -428,14 +540,18 @@ def transform_workflow_text(text: str) -> str:
                         ]
                         insertions.append((run_line_idx, add_lines))
 
-    # Apply insertions bottom-up so earlier line indices are never shifted
     for insert_line, add_lines in sorted(insertions, key=lambda item: item[0], reverse=True):
         lines[insert_line:insert_line] = add_lines
 
     result = ''.join(lines)
-    # Sanity-check resulting YAML parses cleanly
     yaml.safe_load(result)
-    return result
+    return result, warnings
+
+
+def transform_workflow_text(text: str) -> str:
+    """Convenience wrapper returning only the transformed YAML text."""
+    transformed, _ = analyze_and_transform_workflow_text(text)
+    return transformed
 
 
 def wire_contract_test_in_tests_yml(text: str) -> str:
@@ -452,7 +568,6 @@ def wire_contract_test_in_tests_yml(text: str) -> str:
     if not jobs_pair or not isinstance(jobs_pair[1], yaml.MappingNode):
         return text
 
-    # Prefer fast contract/lint/compat job so the check runs without heavy setup
     preferred_jobs = (
         'quality_contract',
         'release_contract',
@@ -483,7 +598,6 @@ def wire_contract_test_in_tests_yml(text: str) -> str:
     first_step = steps_pair[1].value[0]
     last_step = steps_pair[1].value[-1]
     step_indent = ' ' * max(0, first_step.start_mark.column - 2)
-    # Detect actual `- ` indent from the source line of first_step
     lines = text.splitlines(keepends=True)
     first_step_line = lines[first_step.start_mark.line]
     m_dash = re.match(r'^(\s*)-\s', first_step_line)
@@ -553,6 +667,8 @@ class GeneratorResult:
     normalized_diff_sha256: str = ''
     diff_bytes: int = 0
     normalized_diff: str = ''
+    warnings: list[dict[str, Any]] = field(default_factory=list)
+    eligible_for_batch: bool = True
 
 
 def process_repository(
@@ -562,11 +678,17 @@ def process_repository(
     inject_test: bool = True,
     repo_name: str | None = None,
 ) -> GeneratorResult:
-    """Plan or apply workflow hardening to a plugin repository."""
+    """Plan or apply workflow hardening to a plugin repository.
+
+    Fail-closed (C3): if any workflow contains unsupported patterns (compound expressions
+    or with.script interpolations), they are reported in warnings, eligible_for_batch is set
+    to False, and no files are modified when apply=True.
+    """
     repo_root = repo_root.resolve()
     resolved_name = _detect_repo_name(repo_root, repo_name)
     workflows_dir = repo_root / '.github' / 'workflows'
     changes: dict[str, tuple[str, str]] = {}
+    warnings: list[dict[str, Any]] = []
 
     if workflows_dir.is_dir():
         wf_files = sorted(
@@ -575,11 +697,27 @@ def process_repository(
         for wf_path in wf_files:
             rel = wf_path.relative_to(repo_root).as_posix()
             before = wf_path.read_text(encoding='utf-8')
-            after = transform_workflow_text(before)
+            after, wf_warnings = analyze_and_transform_workflow_text(before, workflow_name=rel)
+            warnings.extend(wf_warnings)
             if inject_test and wf_path.name == 'tests.yml':
                 after = wire_contract_test_in_tests_yml(after)
             if after != before:
                 changes[rel] = (before, after)
+
+    eligible_for_batch = len(warnings) == 0
+    if not eligible_for_batch:
+        # Fail closed: leave the repository untouched and out of the automated batch.
+        return GeneratorResult(
+            repo_root=str(repo_root),
+            repo_name=resolved_name,
+            applied=False,
+            changed_files=[],
+            normalized_diff_sha256='',
+            diff_bytes=0,
+            normalized_diff='',
+            warnings=warnings,
+            eligible_for_batch=False,
+        )
 
     if inject_test:
         test_path = repo_root / CONTRACT_TEST_REL_PATH
@@ -605,6 +743,8 @@ def process_repository(
         normalized_diff_sha256=digest,
         diff_bytes=len(normalized_diff.encode('utf-8')),
         normalized_diff=normalized_diff,
+        warnings=[],
+        eligible_for_batch=True,
     )
 
 
@@ -626,33 +766,44 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--json', action='store_true', default=False, help='Emit JSON summary')
     args = parser.parse_args(argv)
 
-    result = process_repository(
-        args.repo,
-        apply=args.apply,
-        inject_test=not args.no_inject_test,
-        repo_name=args.repo_name,
-    )
+    try:
+        result = process_repository(
+            args.repo,
+            apply=args.apply,
+            inject_test=not args.no_inject_test,
+            repo_name=args.repo_name,
+        )
+    except InvalidWorkflowYamlError as exc:
+        print(f'[ERROR] {exc}', file=sys.stderr)
+        return 2
 
     if args.json:
         payload: dict[str, Any] = {
             'repo_root': result.repo_root,
             'repo_name': result.repo_name,
             'applied': result.applied,
+            'eligible_for_batch': result.eligible_for_batch,
             'changed_files': result.changed_files,
             'normalized_diff_sha256': result.normalized_diff_sha256,
             'diff_bytes': result.diff_bytes,
+            'warnings': result.warnings,
         }
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        mode_label = 'APPLIED' if result.applied else 'DRY-RUN'
+        mode_label = 'SKIPPED' if not result.eligible_for_batch else ('APPLIED' if result.applied else 'DRY-RUN')
         print(
-            f'[{mode_label}] repo={result.repo_name} files={len(result.changed_files)} '
-            f'diff_bytes={result.diff_bytes} normalized_diff_sha256={result.normalized_diff_sha256}'
+            f'[{mode_label}] repo={result.repo_name} eligible={result.eligible_for_batch} '
+            f'files={len(result.changed_files)} diff_bytes={result.diff_bytes} '
+            f'normalized_diff_sha256={result.normalized_diff_sha256}'
         )
         for f in result.changed_files:
             print(f'  - {f}')
+        for w in result.warnings:
+            print(
+                f"  ! WARN [{w['kind']}] {w['workflow']} :: {w['job']} :: {w['step']} -> {w['expressions']}"
+            )
 
-    return 0
+    return 0 if result.eligible_for_batch else 2
 
 
 if __name__ == '__main__':
