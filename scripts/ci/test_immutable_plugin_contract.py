@@ -1150,8 +1150,11 @@ class WorkflowShellInjectionContractTests(unittest.TestCase):
             ("hyphen_name", "name = Bad-Plugin\nversion = 1.0\n", "v1.0"),
             ("overlong_name", f"name = {'A' * 65}\nversion = 1.0\n", "v1.0"),
             ("non_numeric_version", "name = BeplyTest\nversion = 1.0-rc1\n", "v1.0-rc1"),
+            ("tag_mismatch", "name = BeplyPlugin_1\nversion = 2.3\n", "v2.4"),
         )
         for wf_name, job_name in targets:
+            step = self._get_step(wf_name, job_name, "Parse and validate plugin identity")
+            self.assertIn("LC_ALL=C", step["run"], f"{wf_name} must force LC_ALL=C for ASCII regex validation")
             for case_name, ini_text, ref_name in malicious_cases:
                 with self.subTest(workflow=wf_name, case=case_name):
                     proc, output = self._run_parse_identity_step(wf_name, job_name, ini_text, ref_name)
