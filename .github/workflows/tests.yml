@@ -349,9 +349,11 @@ jobs:
       - name: Run PHPUnit unit suite
         if: steps.unit-targets.outputs.has_tests == 'true' && matrix.php-version == '8.2'
         working-directory: facturascripts
+        env:
+          PHPUNIT_CONFIG: ${{ steps.unit-targets.outputs.config }}
         run: |
           php -d memory_limit=512M vendor/bin/phpunit \
-            -c ${{ steps.unit-targets.outputs.config }} \
+            -c "${PHPUNIT_CONFIG}" \
             --testdox \
             --log-junit=unit-junit.xml \
             --coverage-clover=coverage.xml \
@@ -567,9 +569,11 @@ jobs:
       - name: Run PHPUnit runtime suite
         if: steps.runtime-targets.outputs.has_tests == 'true'
         working-directory: facturascripts
+        env:
+          PHPUNIT_CONFIG: ${{ steps.runtime-targets.outputs.config }}
         run: |
           php -d memory_limit=768M vendor/bin/phpunit \
-            -c ${{ steps.runtime-targets.outputs.config }} \
+            -c "${PHPUNIT_CONFIG}" \
             --testdox \
             --log-junit=runtime-junit.xml
 
