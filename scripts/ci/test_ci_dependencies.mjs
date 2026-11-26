@@ -132,6 +132,17 @@ test('nunca el propio repo: sin distinguir mayúsculas y aunque su nombre no sea
   assert.equal(bien.status, 0, bien.stderr)
   // En GitHub Actions, GITHUB_REPOSITORY es obligatorio: sin él no se puede descartar el propio repo.
   rejects({ schema: 1, plugins: [dep()] }, /GITHUB_REPOSITORY/, { actions: 'true' })
+  // GITHUB_REPOSITORY con mayúsculas mezcladas y la entrada en minúsculas: también es el propio.
+  rejects({ schema: 1, plugins: [dep({ repository: 'beply-es/maisonsrepo', folder: 'Otro' })] }, /propio plugin/,
+    { plugin: 'MaisonsIntegration', repo: 'beply-es/MaisonsRepo' })
+  // Por HTTPS, beply-es/<repo>.git es el mismo repo (medido con ls-remote): se quita el .git antes de comparar.
+  for (const repository of ['beply-es/maisons.git', 'beply-es/maisons.GIT', 'beply-es/Maisons.Git']) {
+    rejects({ schema: 1, plugins: [dep({ repository, folder: 'Otro' })] }, /propio plugin/,
+      { plugin: 'MaisonsIntegration', repo: 'beply-es/maisons' })
+  }
+  rejects({ schema: 1, plugins: [dep({ repository: 'beply-es/BeplyDemo.git', folder: 'Otro' })] }, /propio plugin/)
+  rejects({ schema: 1, plugins: [dep(), dep({ repository: 'beply-es/BeplyProyectos.git', folder: 'Otro' })] },
+    /repository repetido/)
   // Dos entradas que solo se distinguen en mayúsculas son el mismo repositorio.
   rejects({ schema: 1, plugins: [dep(), dep({ repository: 'beply-es/beplyproyectos', folder: 'Otro' })] },
     /repository repetido/)

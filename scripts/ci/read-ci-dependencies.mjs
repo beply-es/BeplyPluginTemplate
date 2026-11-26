@@ -45,9 +45,10 @@ function readDependencies(pluginFolder, ownRepository) {
     }
     // GitHub resuelve los nombres de repositorio sin distinguir mayúsculas, y el repo puede no llamarse como la
     // carpeta (maisons -> MaisonsIntegration): se compara en minúsculas con los dos.
-    const repoKey = repository.toLowerCase()
+    // Por HTTPS, «X.git» es el mismo repo que «X»: se quita un .git final (sin mayúsculas) antes de comparar.
+    const repoKey = repository.toLowerCase().replace(/\.git$/, '')
     if (folder === pluginFolder || repoKey === `beply-es/${pluginFolder}`.toLowerCase()
-        || (ownRepository && repoKey === ownRepository.toLowerCase())) {
+        || (ownRepository && repoKey === ownRepository.toLowerCase().replace(/\.git$/, ''))) {
       throw new Error(`${where}: no puede ser el propio plugin`)
     }
     if (folders.has(folder)) throw new Error(`${where}: folder repetida ${folder}`)
