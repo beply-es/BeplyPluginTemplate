@@ -249,7 +249,17 @@ jobs:
       expected_jobs: '["guardrails","unit","e2e"]'
 ```
 
-Esta puerta rechaza cualquier ref que no sea tag (`github.ref_type != 'tag'` o `github.ref != refs/tags/<tag>`), comprueba que `refs/tags/<tag>` pela exactamente a `github.sha`, falla cerrado si existe una rama homónima `refs/heads/<tag>` o si la consulta devuelve un error HTTP distinto de `404` (`500`/`403`), y exige un run verde más reciente de `Tests` disparado por `push` del tag con todos los `expected_jobs` en `completed/success`. Para recuperar un fallo de `Tests` sobre un tag existente se relanza el run de `push` del tag (nunca un `workflow_dispatch` de `Tests`). `scripts/ci/release_tag_gate_contract.py` valida que `expected_jobs` casa exactamente con los nombres reales de job del `tests.yml` del repositorio consumidor.
+Esta puerta rechaza cualquier ref que no sea tag (`github.ref_type != 'tag'` o `github.ref != refs/tags/<tag>`), comprueba que `refs/tags/<tag>` pela exactamente a `github.sha`, falla cerrado si existe una rama homónima `refs/heads/<tag>` o si la consulta devuelve un error HTTP distinto de `404` (`500`/`403`) o un payload inesperado en HTTP `200`, y exige un run verde más reciente de `Tests` disparado por `push` del tag con exactamente todos los `expected_jobs` en `completed/success`. Para recuperar un fallo de `Tests` sobre un tag existente se relanza el run de `push` del tag (nunca un `workflow_dispatch` de `Tests`).
+
+`scripts/ci/release_tag_gate_contract.py` (requiere `PyYAML==6.0.2`) valida que `expected_jobs` y `optional_jobs` casan exactamente con los nombres reales de job expandidos de `tests.yml` (incluyendo `strategy.matrix` con `include`/`exclude` y el sufijo ` (vals)` de GitHub Actions). Cada repositorio consumidor puede ejecutarlo en su CI (job `guardrails` o `quality_contract`), importando `validate_consumer_release_tag_gate(...)` o directamente por CLI:
+
+```bash
+python3 scripts/ci/release_tag_gate_contract.py \
+  --release .github/workflows/release.yml \
+  --tests .github/workflows/tests.yml \
+  --expected-repo beply-es/MiPlugin \
+  --matrix .beply/facturascripts-matrix.json  # opcional si tests.yml usa fs_refs
+```
 
 Para la publicación del candidato inmutable:
 

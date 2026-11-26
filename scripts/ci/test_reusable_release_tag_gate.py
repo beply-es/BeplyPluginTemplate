@@ -2,14 +2,18 @@
 """Contract and executable security tests for reusable-release-tag-gate.yml."""
 from __future__ import annotations
 
+import http.server
 import io
 import json
 import re
 import textwrap
+import threading
 import types
 import unittest
 import urllib.error
+import urllib.request
 from pathlib import Path
+from unittest import mock
 
 import yaml
 
@@ -23,6 +27,7 @@ GATE_WORKFLOW = ROOT / ".github" / "workflows" / "reusable-release-tag-gate.yml"
 TEMPLATE_RELEASE = ROOT / ".github" / "workflows" / "release.yml"
 TEMPLATE_TESTS = ROOT / ".github" / "workflows" / "tests.yml"
 TEMPLATE_MATRIX = ROOT / ".beply" / "facturascripts-matrix.json"
+FIXTURES_DIR = ROOT / "scripts" / "ci" / "fixtures"
 
 SHA40 = "a" * 40
 OTHER_SHA40 = "b" * 40
@@ -249,6 +254,56 @@ class ReusableReleaseTagGateWorkflowTests(unittest.TestCase):
         )
         self.assertTrue(ok, reason)
 
+    def test_annotated_tag_peeling_to_different_sha_fails_closed(self) -> None:
+        # T1: an annotated tag whose peeled commit differs from TARGET_SHA must fail closed before querying runs.
+        responses = make_valid_responses()
+        responses[f"https://api.github.com/repos/{SAMPLE_REPO}/git/ref/tags/v1.0"] = {
+            "ref": "refs/tags/v1.0",
+            "object": {"type": "tag", "sha": TAG_OBJ_SHA40},
+        }
+        responses[f"https://api.github.com/repos/{SAMPLE_REPO}/git/tags/{TAG_OBJ_SHA40}"] = {
+            "object": {"type": "commit", "sha": OTHER_SHA40},
+        }
+        calls: list[str] = []
+        ok, reason = self.gate.verify_release_tests(
+            make_env(),
+            get_json=make_fake_get_json(responses, calls=calls),
+            sleep=lambda _: None,
+            max_polls=1,
+        )
+        self.assertFalse(ok)
+        self.assertIn(f"peels to SHA {OTHER_SHA40}, expected {SHA40}", reason)
+        self.assertEqual(
+            calls,
+            [
+                f"https://api.github.com/repos/{SAMPLE_REPO}/git/ref/tags/v1.0",
+                f"https://api.github.com/repos/{SAMPLE_REPO}/git/tags/{TAG_OBJ_SHA40}",
+            ],
+        )
+
+    def test_branch_collision_unexpected_200_payload_fails_closed(self) -> None:
+        # T3: HTTP 200 on git/ref/heads/<tag> with an unexpected ref or list payload must fail closed (never treated as no branch).
+        heads_url = f"https://api.github.com/repos/{SAMPLE_REPO}/git/ref/heads/v1.0"
+        for label, payload in (
+            ("different_branch_ref", {"ref": "refs/heads/v1.0-other", "object": {"type": "commit", "sha": SHA40}}),
+            ("tag_ref_in_heads_endpoint", {"ref": "refs/tags/v1.0", "object": {"type": "commit", "sha": SHA40}}),
+            ("empty_dict", {}),
+            ("prefix_match_list", [{"ref": "refs/heads/v1.0-other", "object": {"type": "commit", "sha": SHA40}}]),
+        ):
+            with self.subTest(payload=label):
+                responses = make_valid_responses()
+                responses[heads_url] = payload
+                calls: list[str] = []
+                ok, reason = self.gate.verify_release_tests(
+                    make_env(),
+                    get_json=make_fake_get_json(responses, calls=calls),
+                    sleep=lambda _: None,
+                    max_polls=1,
+                )
+                self.assertFalse(ok, f"{label} must fail closed: {reason}")
+                self.assertIn("Failed to verify absence of branch refs/heads/v1.0", reason)
+                self.assertEqual(len(calls), 2)
+
     def test_ref_type_branch_and_non_refs_tags_rejected_before_network(self) -> None:
         for overrides, expected_msg in (
             ({"TARGET_REF_TYPE": "branch"}, "Refusing non-tag ref type: 'branch'"),
@@ -368,6 +423,20 @@ class ReusableReleaseTagGateWorkflowTests(unittest.TestCase):
                 )
                 self.assertFalse(ok)
 
+        # T2: same job count with a renamed required job must fail closed (exact name set equality).
+        renamed_jobs = [
+            {**j, "name": "e2e-renamed"} if j["name"] == "e2e" else j
+            for j in good
+        ]
+        self.assertEqual(len(renamed_jobs), len(SAMPLE_JOBS))
+        ok_renamed, reason_renamed = self.gate.verify_release_tests(
+            make_env(),
+            get_json=make_fake_get_json(make_valid_responses(jobs=renamed_jobs)),
+            sleep=lambda _: None,
+            max_polls=1,
+        )
+        self.assertFalse(ok_renamed, f"Renamed required job must fail closed: {reason_renamed}")
+
         # Advisory job with continue-on-error: completed/failure is allowed only when listed in OPTIONAL_JOBS_JSON.
         advisory_jobs = good + [{"name": "PHP 8.4 Compatibility", "status": "completed", "conclusion": "failure"}]
         ok_without_opt, _ = self.gate.verify_release_tests(
@@ -411,6 +480,46 @@ class ReusableReleaseTagGateWorkflowTests(unittest.TestCase):
         handler = self.gate._NoRedirect()
         with self.assertRaises(urllib.error.HTTPError):
             handler.redirect_request(None, None, 302, "redirect", {}, "https://untrusted.invalid/")
+
+    def test_make_get_json_uses_no_redirect_opener_and_never_urlopen(self) -> None:
+        # T4: verify _make_get_json actually uses _NoRedirect opener and never follows redirects or calls urlopen.
+        seen_paths: list[str] = []
+
+        class RedirectHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                seen_paths.append(self.path)
+                if self.path == "/start":
+                    self.send_response(302)
+                    self.send_header("Location", f"http://127.0.0.1:{self.server.server_port}/redirected")
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"leaked": true}')
+
+            def log_message(self, format: str, *args) -> None:  # noqa: A002
+                return
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), RedirectHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            get_json = self.gate._make_get_json("synthetic-secret-token")
+            with mock.patch.object(
+                urllib.request,
+                "urlopen",
+                side_effect=AssertionError("get_json must use _NoRedirect opener, not urllib.request.urlopen"),
+            ):
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    get_json(f"http://127.0.0.1:{server.server_port}/start")
+            self.assertEqual(ctx.exception.code, 302)
+            self.assertIn("redirect refused", str(ctx.exception))
+            self.assertEqual(seen_paths, ["/start"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
 
 class ConsumerExpectedJobsContractTests(unittest.TestCase):
@@ -492,6 +601,93 @@ class ConsumerExpectedJobsContractTests(unittest.TestCase):
                 consumer_tests,
                 expected_repo=SAMPLE_REPO,
             )
+
+    def test_real_mirakl_integration_tests_yml_expands_to_exact_10_jobs(self) -> None:
+        # T5: real MiraklIntegration tests.yml uses matrix include (both augmenting and adding PHP 8.4 unit leg).
+        mirakl_tests = (FIXTURES_DIR / "mirakl-integration-tests.yml").read_text(encoding="utf-8")
+        required, advisory = extract_tests_job_names(mirakl_tests)
+        expected_10 = frozenset({
+            "Guardrails",
+            "unit / Core 2025.71 / MC 22.3 / PHP 8.2",
+            "unit / Core 2025.71 / MC 22.4 / PHP 8.2",
+            "unit / Core 2026.72 / MC 22.3 / PHP 8.2",
+            "unit / Core 2026.72 / MC 22.4 / PHP 8.2",
+            "runtime / Core 2025.71 / MC 22.3 / PHP 8.2",
+            "runtime / Core 2025.71 / MC 22.4 / PHP 8.2",
+            "runtime / Core 2026.72 / MC 22.3 / PHP 8.2",
+            "runtime / Core 2026.72 / MC 22.4 / PHP 8.2",
+            "unit / Core 2025.71 / MC 22.4 / PHP 8.4",
+        })
+        self.assertEqual(len(required), 10)
+        self.assertEqual(required, expected_10)
+        self.assertEqual(advisory, frozenset())
+
+    def test_real_pinkconnect_integration_tests_yml_expands_to_exact_5_jobs(self) -> None:
+        # T5: real PinkconnectIntegration tests.yml (no job name on matrix job -> runtime (vals)).
+        pink_tests = (FIXTURES_DIR / "pinkconnect-integration-tests.yml").read_text(encoding="utf-8")
+        required, advisory = extract_tests_job_names(pink_tests)
+        self.assertEqual(
+            required,
+            frozenset({"guardrails", "unit", "runtime (baseline)", "runtime (2026.7)", "e2e"}),
+        )
+        self.assertEqual(advisory, frozenset())
+
+    def test_matrix_exclude_include_static_name_suffix_and_unsupported_constructs(self) -> None:
+        # T5: exclude removes matching combos; static name gets ' (vals)' suffix; include-only matrix works.
+        wf = textwrap.dedent("""\
+            name: Tests
+            on: [push]
+            jobs:
+              runtime:
+                name: Runtime
+                runs-on: arc-runner-set
+                strategy:
+                  matrix:
+                    core: ['2025.71', '2026.72']
+                    php: ['8.2', '8.4']
+                    exclude:
+                      - core: '2026.72'
+                        php: '8.4'
+                    include:
+                      - core: '2025.71'
+                        php: '8.2'
+                        extra: ignored-in-suffix
+                      - core: '2026.72'
+                        php: '8.3'
+              include_only:
+                name: Custom ${{ matrix.target }}
+                runs-on: arc-runner-set
+                strategy:
+                  matrix:
+                    include:
+                      - target: alpha
+                      - target: beta
+        """)
+        required, advisory = extract_tests_job_names(wf)
+        self.assertEqual(
+            required,
+            frozenset({
+                "Runtime (2025.71, 8.2)",
+                "Runtime (2025.71, 8.4)",
+                "Runtime (2026.72, 8.2)",
+                "Runtime (2026.72, 8.3)",
+                "Custom alpha",
+                "Custom beta",
+            }),
+        )
+        self.assertEqual(advisory, frozenset())
+
+        # Unsupported constructs must fail closed with explicit ValueError.
+        unsupported_cases = (
+            ("dynamic_matrix", "jobs:\n  j:\n    strategy:\n      matrix: ${{ fromJSON(needs.a.outputs.m) }}\n"),
+            ("dynamic_include", "jobs:\n  j:\n    strategy:\n      matrix:\n        a: ['1']\n        include: ${{ fromJSON(needs.a.outputs.i) }}\n"),
+            ("dynamic_exclude", "jobs:\n  j:\n    strategy:\n      matrix:\n        a: ['1']\n        exclude: ${{ fromJSON(needs.a.outputs.e) }}\n"),
+            ("unresolved_expr_in_name", "jobs:\n  j:\n    name: Job ${{ vars.FOO }}\n    runs-on: arc-runner-set\n"),
+            ("dynamic_continue_on_error", "jobs:\n  j:\n    continue-on-error: ${{ matrix.experimental }}\n    strategy:\n      matrix:\n        experimental: [true, false]\n"),
+        )
+        for label, bad_yaml in unsupported_cases:
+            with self.subTest(case=label), self.assertRaises(ValueError):
+                extract_tests_job_names(bad_yaml)
 
 
 if __name__ == "__main__":

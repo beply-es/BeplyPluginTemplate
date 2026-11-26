@@ -1,0 +1,717 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - 'v*'
+  pull_request:
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  FACTURASCRIPTS_REF: "b4f2422e4a3f5931c7188214fb8e2196b80182b5"
+  MARKETPLACE_ENCRYPTION_KEY: "cpYKaSlvP2C7QiQfXXANjjnTqSKJB8FsR7Wrc2eWkzw="
+  BEPLY_TENANT_ENCRYPTION_KEY: "cpYKaSlvP2C7QiQfXXANjjnTqSKJB8FsR7Wrc2eWkzw="
+
+concurrency:
+  group: pinkconnectintegration-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  guardrails:
+    timeout-minutes: 10
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+
+    steps:
+      - name: Checkout Plugin
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@accd6127cb78bee3e8082180cb391013d204ef9f # 2.37.0
+        with:
+          php-version: '8.4'
+          extensions: mbstring, intl, zip, curl, pgsql, pdo_pgsql
+          coverage: none
+
+      - name: Test immutable dependency checkout
+        run: python3 scripts/ci/test-dependency-checkout.py
+
+      - name: Test release workflow contract
+        run: python3 scripts/ci/test-release-workflow-contract.py
+
+      - name: Whitespace diff check
+        run: git diff --check
+
+      - name: GitHub Actions syntax lint
+        run: |
+          set -euo pipefail
+          version="1.7.12"
+          arch="$(uname -m)"
+          case "$arch" in
+            x86_64|amd64)
+              asset_arch="amd64"
+              expected_sha="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+              ;;
+            aarch64|arm64)
+              asset_arch="arm64"
+              expected_sha="325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6"
+              ;;
+            *)
+              echo "::error::Unsupported actionlint architecture: ${arch}"
+              exit 1
+              ;;
+          esac
+          curl -fsSL -o /tmp/actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_${asset_arch}.tar.gz"
+          echo "${expected_sha}  /tmp/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          /tmp/actionlint -version
+          /tmp/actionlint .github/workflows/*.yml
+
+      - name: Manifest version guard
+        run: |
+          set -euo pipefail
+          python3 - <<'PY2'
+          import re
+          from pathlib import Path
+
+          ini = Path('facturascripts.ini')
+          if not ini.exists():
+              raise SystemExit('facturascripts.ini not found')
+
+          match = re.search(r'^version\s*=\s*[\"\']?([^\"\'\r\n]+)', ini.read_text(), re.M)
+          if not match:
+              raise SystemExit('version not found in facturascripts.ini')
+
+          version = match.group(1).strip()
+          if not re.fullmatch(r'\d+\.\d', version):
+              raise SystemExit(f'Plugin version must use X.Y with one decimal digit, got {version!r}')
+          PY2
+
+      - name: PHP syntax lint
+        run: |
+          set -euo pipefail
+          find . \( -path './.git' -o -path './vendor' -o -path './node_modules' \) -prune -o -name '*.php' -print0 | xargs -0 -r -n 1 php -l
+
+      - name: PHP 8.4 compatibility scan
+        run: php scripts/ci/php84-compat-scan.php "$PWD"
+
+      - name: Table XML lowercase guard
+        run: |
+          set -euo pipefail
+          python3 - <<'PY2'
+          from pathlib import Path
+
+          errors = []
+          table_dir = Path('Table')
+          if table_dir.exists():
+              for path in table_dir.glob('*.xml'):
+                  if path.name != path.name.lower():
+                      errors.append(f'{path}: table XML filename must be lowercase for PostgreSQL')
+                  if any(ch.isupper() for ch in path.stem):
+                      errors.append(f'{path}: table XML stem must not contain uppercase characters')
+
+          if errors:
+              raise SystemExit('\n'.join(errors))
+          PY2
+
+      - name: Structural marketplace guards
+        run: |
+          set -euo pipefail
+          python3 - <<'PY2'
+          import re
+          from pathlib import Path
+
+          errors = []
+          skip = {'.git', 'vendor', 'node_modules'}
+
+          for path in Path('.').rglob('*.php'):
+              if any(part in skip for part in path.parts):
+                  continue
+
+              text = path.read_text(errors='ignore')
+              parts = set(path.parts)
+              is_test = 'Test' in parts
+              is_ci = '.github' in parts
+
+              if not is_test and not is_ci:
+                  if 'Plugins\\Integrations' in text or 'Plugins\\\\Integrations' in text:
+                      errors.append(f'{path}: legacy Integrations dependency is not allowed')
+
+              if 'Worker' in parts:
+                  for pattern in [r'\bsleep\s*\(', r'\bdie\s*\(', r'\bprint_r\s*\(']:
+                      if re.search(pattern, text):
+                          errors.append(f'{path}: forbidden worker debug/blocking call {pattern}')
+
+          if errors:
+              raise SystemExit('\n'.join(errors))
+          PY2
+
+      - name: Composer manifest validation
+        run: |
+          set -euo pipefail
+          if [ -f composer.json ]; then
+            composer validate --no-check-publish --no-check-lock
+          fi
+
+  unit:
+    timeout-minutes: 15
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+
+    steps:
+      - name: Checkout FacturaScripts
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: NeoRazorX/facturascripts
+          ref: ${{ env.FACTURASCRIPTS_REF }}
+          path: facturascripts
+
+      - name: Verify FacturaScripts dependency SHA
+        run: test "$(git -C facturascripts rev-parse HEAD)" = "$FACTURASCRIPTS_REF"
+
+      - name: Checkout Plugin
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          path: facturascripts/Plugins/PinkconnectIntegration
+          fetch-depth: 0
+
+      - name: Clone unit dependencies
+        env:
+          GH_READ_TOKEN: ${{ secrets.BEPLY_GH_READ_TOKEN }}
+          GH_TOKEN_FALLBACK: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          clone_manifest() {
+            local manifest="$1"
+            [ -f "$manifest" ] || return 0
+
+            local token="${GH_READ_TOKEN:-$GH_TOKEN_FALLBACK}"
+            while read -r repo folder ref; do
+              [ -n "${repo:-}" ] || continue
+              [[ "$repo" =~ ^# ]] && continue
+              [ -n "${folder:-}" ] || { echo "::error::Invalid dependency line in $manifest"; exit 1; }
+
+              local target="facturascripts/Plugins/${folder}"
+              [ -d "$target" ] && continue
+
+              local clone_ref="${ref:-main}"
+              local candidate_ref="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}"
+              if [[ ! "$clone_ref" =~ ^[0-9a-f]{40}$ ]] && [ "$repo" = "beply-es/MarketplaceCore" ] && [ -n "${candidate_ref}" ]; then
+                if git ls-remote --exit-code --heads "https://x-access-token:${token}@github.com/${repo}.git" "${candidate_ref}" >/dev/null 2>&1; then
+                  clone_ref="${candidate_ref}"
+                fi
+              fi
+
+              if [[ "$clone_ref" =~ ^[0-9a-f]{40}$ ]]; then
+                git clone --depth 1 --no-checkout --filter=blob:none \
+                  "https://x-access-token:${token}@github.com/${repo}.git" "$target"
+                git -C "$target" fetch --depth 1 origin "$clone_ref"
+                git -C "$target" checkout --detach FETCH_HEAD
+              else
+                git clone --depth 1 --branch "$clone_ref" \
+                  "https://x-access-token:${token}@github.com/${repo}.git" "$target"
+              fi
+            done < "$manifest"
+          }
+
+          clone_manifest facturascripts/Plugins/PinkconnectIntegration/.github/ci/unit-dependencies.txt
+
+      - name: Setup PHP with PCOV
+        uses: shivammathur/setup-php@accd6127cb78bee3e8082180cb391013d204ef9f # 2.37.0
+        with:
+          php-version: '8.4'
+          extensions: mbstring, intl, zip, curl, pgsql, pdo_pgsql
+          coverage: pcov
+
+      - name: Install Composer dependencies
+        working-directory: facturascripts
+        run: |
+          # the pinned core ships no composer.lock and declares platform.php 8.0; resolve for the PHP in use
+          composer config platform.php "$(php -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;')"
+          composer install --no-interaction --prefer-dist
+
+      - name: Install plugin Composer dependencies
+        working-directory: facturascripts
+        run: |
+          set -euo pipefail
+          folders=(PinkconnectIntegration)
+          if [ -f Plugins/PinkconnectIntegration/.github/ci/unit-composer-dependencies.txt ]; then
+            while read -r folder; do
+              [ -n "${folder:-}" ] || continue
+              [[ "$folder" =~ ^# ]] && continue
+              folders+=("$folder")
+            done < Plugins/PinkconnectIntegration/.github/ci/unit-composer-dependencies.txt
+          fi
+
+          unique=()
+          for folder in "${folders[@]}"; do
+            [[ " ${unique[*]} " == *" ${folder} "* ]] && continue
+            unique+=("$folder")
+          done
+
+          for folder in "${unique[@]}"; do
+            composer_file="Plugins/${folder}/composer.json"
+            [ -f "$composer_file" ] || continue
+            composer install --working-dir="$(dirname "$composer_file")" --no-interaction --prefer-dist
+          done
+
+      - name: Prepare unit bootstrap
+        working-directory: facturascripts
+        run: |
+          cp Plugins/PinkconnectIntegration/.github/ci/unit-bootstrap.php Test/pinkconnectintegration-ci-bootstrap.php
+
+      - name: Discover unit targets
+        id: unit-targets
+        working-directory: facturascripts
+        run: |
+          set -euo pipefail
+          targets=()
+          [ -d Plugins/PinkconnectIntegration/Test/Unit ] && targets+=(Plugins/PinkconnectIntegration/Test/Unit)
+          [ -d Plugins/PinkconnectIntegration/Test/main ] && targets+=(Plugins/PinkconnectIntegration/Test/main)
+
+          if [ "${#targets[@]}" -eq 0 ]; then
+            echo "::error::Phase 1 integrations must keep at least one unit target under Test/Unit"
+            exit 1
+          fi
+
+          echo "has_tests=true" >> "$GITHUB_OUTPUT"
+          echo "targets=${targets[*]}" >> "$GITHUB_OUTPUT"
+
+      - name: Run PHPUnit unit suite
+        if: steps.unit-targets.outputs.has_tests == 'true'
+        working-directory: facturascripts
+        run: |
+          php -d memory_limit=512M vendor/bin/phpunit -c phpunit-plugins.xml \
+            --bootstrap Test/pinkconnectintegration-ci-bootstrap.php \
+            --testdox \
+            --exclude-group integration,e2e \
+            --coverage-clover=coverage.xml \
+            --coverage-text \
+            ${{ steps.unit-targets.outputs.targets }}
+
+      - name: Upload coverage to Codecov
+        if: steps.unit-targets.outputs.has_tests == 'true'
+        uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5
+        with:
+          files: facturascripts/coverage.xml
+          flags: unittests
+          name: pinkconnectintegration-coverage
+          fail_ci_if_error: false
+          verbose: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  runtime:
+    timeout-minutes: 20
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+    env:
+      # Core 2026.7 (e9006252) only keeps attachments directly under MyFiles; the pinned core predates it,
+      # so the invoice PDF path is also exercised on Core 2026.7.
+      FACTURASCRIPTS_REF: ${{ matrix.core-profile == '2026.7' && '6e9bdf49e7e6743c7dfae75b675106d8b75d4f00' || 'b4f2422e4a3f5931c7188214fb8e2196b80182b5' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        core-profile: ['baseline', '2026.7']
+
+    steps:
+      - name: Checkout FacturaScripts
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: NeoRazorX/facturascripts
+          ref: ${{ env.FACTURASCRIPTS_REF }}
+          path: facturascripts
+
+      - name: Verify FacturaScripts dependency SHA
+        run: test "$(git -C facturascripts rev-parse HEAD)" = "$FACTURASCRIPTS_REF"
+
+      - name: Checkout Plugin
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          path: facturascripts/Plugins/PinkconnectIntegration
+          fetch-depth: 0
+
+      - name: Clone runtime dependencies
+        env:
+          GH_READ_TOKEN: ${{ secrets.BEPLY_GH_READ_TOKEN }}
+          GH_TOKEN_FALLBACK: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          clone_manifest() {
+            local manifest="$1"
+            [ -f "$manifest" ] || return 0
+
+            local token="${GH_READ_TOKEN:-$GH_TOKEN_FALLBACK}"
+            while read -r repo folder ref; do
+              [ -n "${repo:-}" ] || continue
+              [[ "$repo" =~ ^# ]] && continue
+              [ -n "${folder:-}" ] || { echo "::error::Invalid dependency line in $manifest"; exit 1; }
+
+              local target="facturascripts/Plugins/${folder}"
+              [ -d "$target" ] && continue
+
+              local clone_ref="${ref:-main}"
+              local candidate_ref="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}"
+              if [[ ! "$clone_ref" =~ ^[0-9a-f]{40}$ ]] && [ "$repo" = "beply-es/MarketplaceCore" ] && [ -n "${candidate_ref}" ]; then
+                if git ls-remote --exit-code --heads "https://x-access-token:${token}@github.com/${repo}.git" "${candidate_ref}" >/dev/null 2>&1; then
+                  clone_ref="${candidate_ref}"
+                fi
+              fi
+
+              if [[ "$clone_ref" =~ ^[0-9a-f]{40}$ ]]; then
+                git clone --depth 1 --no-checkout --filter=blob:none \
+                  "https://x-access-token:${token}@github.com/${repo}.git" "$target"
+                git -C "$target" fetch --depth 1 origin "$clone_ref"
+                git -C "$target" checkout --detach FETCH_HEAD
+              else
+                git clone --depth 1 --branch "$clone_ref" \
+                  "https://x-access-token:${token}@github.com/${repo}.git" "$target"
+              fi
+            done < "$manifest"
+          }
+
+          clone_manifest facturascripts/Plugins/PinkconnectIntegration/.github/ci/runtime-dependencies.txt
+
+      - name: Collect runtime plugin folders
+        working-directory: facturascripts
+        run: |
+          set -euo pipefail
+          folders=(PinkconnectIntegration)
+          if [ -f Plugins/PinkconnectIntegration/.github/ci/runtime-dependencies.txt ]; then
+            while read -r _repo folder _ref; do
+              [ -n "${folder:-}" ] || continue
+              [[ "$folder" =~ ^# ]] && continue
+              folders+=("$folder")
+            done < Plugins/PinkconnectIntegration/.github/ci/runtime-dependencies.txt
+          fi
+
+          unique=()
+          for folder in "${folders[@]}"; do
+            [[ " ${unique[*]} " == *" ${folder} "* ]] && continue
+            unique+=("$folder")
+          done
+
+          echo "MARKETPLACE_PLUGIN_FOLDERS=$(IFS=,; echo "${unique[*]}")" >> "$GITHUB_ENV"
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@accd6127cb78bee3e8082180cb391013d204ef9f # 2.37.0
+        with:
+          php-version: '8.4'
+          extensions: mbstring, intl, zip, curl, pgsql, pdo_pgsql
+          coverage: none
+
+      - name: Install Composer dependencies
+        working-directory: facturascripts
+        run: |
+          # the pinned core ships no composer.lock and declares platform.php 8.0; resolve for the PHP in use
+          composer config platform.php "$(php -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;')"
+          composer install --no-interaction --prefer-dist
+
+      - name: Install plugin Composer dependencies
+        working-directory: facturascripts
+        run: |
+          set -euo pipefail
+          folders=(PinkconnectIntegration)
+          if [ -f Plugins/PinkconnectIntegration/.github/ci/runtime-composer-dependencies.txt ]; then
+            while read -r folder; do
+              [ -n "${folder:-}" ] || continue
+              [[ "$folder" =~ ^# ]] && continue
+              folders+=("$folder")
+            done < Plugins/PinkconnectIntegration/.github/ci/runtime-composer-dependencies.txt
+          fi
+
+          unique=()
+          for folder in "${folders[@]}"; do
+            [[ " ${unique[*]} " == *" ${folder} "* ]] && continue
+            unique+=("$folder")
+          done
+
+          for folder in "${unique[@]}"; do
+            composer_file="Plugins/${folder}/composer.json"
+            [ -f "$composer_file" ] || continue
+            composer install --working-dir="$(dirname "$composer_file")" --no-interaction --prefer-dist
+          done
+
+      - name: Start local PostgreSQL
+        working-directory: facturascripts
+        run: |
+          bash Plugins/PinkconnectIntegration/.github/ci/start-local-postgres.sh
+
+      - name: Prepare runtime bootstrap
+        working-directory: facturascripts
+        run: |
+          cp Plugins/PinkconnectIntegration/.github/ci/runtime-bootstrap.marketplace.php Test/test-marketplaces.php
+          cat > config.php << 'EOF'
+          <?php
+          define('FS_COOKIES_EXPIRE', 31536000);
+          define('FS_ROUTE', '');
+          define('FS_DB_TYPE', 'postgresql');
+          define('FS_DB_HOST', '127.0.0.1');
+          define('FS_DB_PORT', 5432);
+          define('FS_DB_NAME', 'facturascripts');
+          define('FS_DB_USER', 'postgres');
+          define('FS_DB_PASS', 'mypassword');
+          define('FS_DB_FOREIGN_KEYS', true);
+          define('FS_DB_TYPE_CHECK', true);
+          define('FS_PGSQL_SSL', false);
+          define('FS_PGSQL_ENDPOINT', false);
+          define('FS_LANG', 'es_ES');
+          define('FS_TIMEZONE', 'Europe/Madrid');
+          define('FS_HIDDEN_PLUGINS', '');
+          define('FS_DEBUG', false);
+          define('FS_DISABLE_ADD_PLUGINS', false);
+          define('FS_DISABLE_RM_PLUGINS', false);
+          EOF
+
+      - name: Discover integration targets
+        id: integration-targets
+        working-directory: facturascripts
+        run: |
+          set -euo pipefail
+          targets=()
+          [ -d Plugins/PinkconnectIntegration/Test/Integration ] && targets+=(Plugins/PinkconnectIntegration/Test/Integration)
+
+          if [ "${#targets[@]}" -eq 0 ]; then
+            echo "::error::Phase 1 integrations must keep at least one runtime target under Test/Integration"
+            exit 1
+          fi
+
+          echo "has_tests=true" >> "$GITHUB_OUTPUT"
+          echo "targets=${targets[*]}" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure runtime filesystem folders
+        working-directory: facturascripts
+        run: |
+          mkdir -p MyFiles/Cache MyFiles/facturas
+
+      - name: Run PHPUnit integration suite
+        if: steps.integration-targets.outputs.has_tests == 'true'
+        working-directory: facturascripts
+        env:
+          MARKETPLACE_PLUGIN_FOLDERS: ${{ env.MARKETPLACE_PLUGIN_FOLDERS }}
+        run: |
+          php -d memory_limit=768M vendor/bin/phpunit \
+            --bootstrap Test/test-marketplaces.php \
+            --testdox \
+            ${{ steps.integration-targets.outputs.targets }}
+
+      - name: Stop local PostgreSQL
+        if: always()
+        working-directory: facturascripts
+        run: |
+          if [ -n "${PGDATA_DIR:-}" ] && [ -f "${PGDATA_DIR}/postmaster.pid" ]; then
+            if [ "${PG_RUN_AS_POSTGRES:-0}" = "1" ]; then
+              runuser -u postgres -- env PATH="${PATH}" pg_ctl -D "${PGDATA_DIR}" -m fast stop
+            else
+              pg_ctl -D "${PGDATA_DIR}" -m fast stop
+            fi
+          fi
+
+  e2e:
+    needs:
+      - guardrails
+      - unit
+      - runtime
+    timeout-minutes: 20
+    runs-on: ${{ vars.BEPLY_GHA_RUNNER || 'arc-runner-set' }}
+
+    steps:
+      - name: Checkout FacturaScripts
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: NeoRazorX/facturascripts
+          ref: ${{ env.FACTURASCRIPTS_REF }}
+          path: facturascripts
+
+      - name: Verify FacturaScripts dependency SHA
+        run: test "$(git -C facturascripts rev-parse HEAD)" = "$FACTURASCRIPTS_REF"
+
+      - name: Checkout Plugin
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          path: facturascripts/Plugins/PinkconnectIntegration
+          fetch-depth: 0
+
+      - name: Clone runtime dependencies
+        env:
+          GH_READ_TOKEN: ${{ secrets.BEPLY_GH_READ_TOKEN }}
+          GH_TOKEN_FALLBACK: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          clone_manifest() {
+            local manifest="$1"
+            [ -f "$manifest" ] || return 0
+
+            local token="${GH_READ_TOKEN:-$GH_TOKEN_FALLBACK}"
+            while read -r repo folder ref; do
+              [ -n "${repo:-}" ] || continue
+              [[ "$repo" =~ ^# ]] && continue
+              [ -n "${folder:-}" ] || { echo "::error::Invalid dependency line in $manifest"; exit 1; }
+
+              local target="facturascripts/Plugins/${folder}"
+              [ -d "$target" ] && continue
+
+              local clone_ref="${ref:-main}"
+              local candidate_ref="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}"
+              if [[ ! "$clone_ref" =~ ^[0-9a-f]{40}$ ]] && [ "$repo" = "beply-es/MarketplaceCore" ] && [ -n "${candidate_ref}" ]; then
+                if git ls-remote --exit-code --heads "https://x-access-token:${token}@github.com/${repo}.git" "${candidate_ref}" >/dev/null 2>&1; then
+                  clone_ref="${candidate_ref}"
+                fi
+              fi
+
+              if [[ "$clone_ref" =~ ^[0-9a-f]{40}$ ]]; then
+                git clone --depth 1 --no-checkout --filter=blob:none \
+                  "https://x-access-token:${token}@github.com/${repo}.git" "$target"
+                git -C "$target" fetch --depth 1 origin "$clone_ref"
+                git -C "$target" checkout --detach FETCH_HEAD
+              else
+                git clone --depth 1 --branch "$clone_ref" \
+                  "https://x-access-token:${token}@github.com/${repo}.git" "$target"
+              fi
+            done < "$manifest"
+          }
+
+          clone_manifest facturascripts/Plugins/PinkconnectIntegration/.github/ci/runtime-dependencies.txt
+
+      - name: Collect runtime plugin folders
+        working-directory: facturascripts
+        run: |
+          set -euo pipefail
+          folders=(PinkconnectIntegration)
+          if [ -f Plugins/PinkconnectIntegration/.github/ci/runtime-dependencies.txt ]; then
+            while read -r _repo folder _ref; do
+              [ -n "${folder:-}" ] || continue
+              [[ "$folder" =~ ^# ]] && continue
+              folders+=("$folder")
+            done < Plugins/PinkconnectIntegration/.github/ci/runtime-dependencies.txt
+          fi
+
+          unique=()
+          for folder in "${folders[@]}"; do
+            [[ " ${unique[*]} " == *" ${folder} "* ]] && continue
+            unique+=("$folder")
+          done
+
+          echo "MARKETPLACE_PLUGIN_FOLDERS=$(IFS=,; echo "${unique[*]}")" >> "$GITHUB_ENV"
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@accd6127cb78bee3e8082180cb391013d204ef9f # 2.37.0
+        with:
+          php-version: '8.4'
+          extensions: mbstring, intl, zip, curl, pgsql, pdo_pgsql
+          coverage: none
+
+      - name: Install Composer dependencies
+        working-directory: facturascripts
+        run: |
+          # the pinned core ships no composer.lock and declares platform.php 8.0; resolve for the PHP in use
+          composer config platform.php "$(php -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;')"
+          composer install --no-interaction --prefer-dist
+
+      - name: Install plugin Composer dependencies
+        working-directory: facturascripts
+        run: |
+          set -euo pipefail
+          folders=(PinkconnectIntegration)
+          if [ -f Plugins/PinkconnectIntegration/.github/ci/runtime-composer-dependencies.txt ]; then
+            while read -r folder; do
+              [ -n "${folder:-}" ] || continue
+              [[ "$folder" =~ ^# ]] && continue
+              folders+=("$folder")
+            done < Plugins/PinkconnectIntegration/.github/ci/runtime-composer-dependencies.txt
+          fi
+
+          unique=()
+          for folder in "${folders[@]}"; do
+            [[ " ${unique[*]} " == *" ${folder} "* ]] && continue
+            unique+=("$folder")
+          done
+
+          for folder in "${unique[@]}"; do
+            composer_file="Plugins/${folder}/composer.json"
+            [ -f "$composer_file" ] || continue
+            composer install --working-dir="$(dirname "$composer_file")" --no-interaction --prefer-dist
+          done
+
+      - name: Start local PostgreSQL
+        working-directory: facturascripts
+        run: |
+          bash Plugins/PinkconnectIntegration/.github/ci/start-local-postgres.sh
+
+      - name: Prepare runtime bootstrap
+        working-directory: facturascripts
+        run: |
+          cp Plugins/PinkconnectIntegration/.github/ci/runtime-bootstrap.marketplace.php Test/test-marketplaces.php
+          cat > config.php << 'EOF'
+          <?php
+          define('FS_COOKIES_EXPIRE', 31536000);
+          define('FS_ROUTE', '');
+          define('FS_DB_TYPE', 'postgresql');
+          define('FS_DB_HOST', '127.0.0.1');
+          define('FS_DB_PORT', 5432);
+          define('FS_DB_NAME', 'facturascripts');
+          define('FS_DB_USER', 'postgres');
+          define('FS_DB_PASS', 'mypassword');
+          define('FS_DB_FOREIGN_KEYS', true);
+          define('FS_DB_TYPE_CHECK', true);
+          define('FS_PGSQL_SSL', false);
+          define('FS_PGSQL_ENDPOINT', false);
+          define('FS_LANG', 'es_ES');
+          define('FS_TIMEZONE', 'Europe/Madrid');
+          define('FS_HIDDEN_PLUGINS', '');
+          define('FS_DEBUG', false);
+          define('FS_DISABLE_ADD_PLUGINS', false);
+          define('FS_DISABLE_RM_PLUGINS', false);
+          EOF
+
+      - name: Discover e2e targets
+        id: e2e-targets
+        working-directory: facturascripts
+        run: |
+          set -euo pipefail
+          targets=()
+          [ -d Plugins/PinkconnectIntegration/Test/E2E ] && targets+=(Plugins/PinkconnectIntegration/Test/E2E)
+          [ -d Plugins/PinkconnectIntegration/Test/e2e ] && targets+=(Plugins/PinkconnectIntegration/Test/e2e)
+
+          if [ "${#targets[@]}" -eq 0 ]; then
+            echo "::error::Phase 1 integrations must keep at least one E2E target under Test/E2E"
+            exit 1
+          fi
+
+          echo "has_tests=true" >> "$GITHUB_OUTPUT"
+          echo "targets=${targets[*]}" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure runtime filesystem folders
+        working-directory: facturascripts
+        run: |
+          mkdir -p MyFiles/Cache MyFiles/facturas
+
+      - name: Run PHPUnit e2e suite
+        working-directory: facturascripts
+        env:
+          MARKETPLACE_PLUGIN_FOLDERS: ${{ env.MARKETPLACE_PLUGIN_FOLDERS }}
+        run: |
+          php -d memory_limit=768M vendor/bin/phpunit \
+            --bootstrap Test/test-marketplaces.php \
+            --testdox \
+            ${{ steps.e2e-targets.outputs.targets }}
+
+      - name: Stop local PostgreSQL
+        if: always()
+        working-directory: facturascripts
+        run: |
+          if [ -n "${PGDATA_DIR:-}" ] && [ -f "${PGDATA_DIR}/postmaster.pid" ]; then
+            if [ "${PG_RUN_AS_POSTGRES:-0}" = "1" ]; then
+              runuser -u postgres -- env PATH="${PATH}" pg_ctl -D "${PGDATA_DIR}" -m fast stop
+            else
+              pg_ctl -D "${PGDATA_DIR}" -m fast stop
+            fi
+          fi

@@ -2,19 +2,31 @@
 """Contract helpers for verifying consumer release-tag-gate alignment with tests.yml."""
 from __future__ import annotations
 
+import argparse
 import itertools
 import json
 import re
+import sys
+from pathlib import Path
 from typing import Any
 
 import yaml
 
 MATRIX_EXPR_RE = re.compile(r"\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}")
+ANY_EXPR_RE = re.compile(r"\$\{\{.*?\}\}", re.DOTALL)
 FS_REFS_EXPR = "${{ fromJSON(needs.quality_contract.outputs.fs_refs) }}"
 REUSABLE_GATE_PIN_RE = re.compile(
     r"^beply-es/BeplyPluginTemplate/\.github/workflows/reusable-release-tag-gate\.yml@([0-9a-f]{40})$"
 )
 LOCAL_GATE_USES = "./.github/workflows/reusable-release-tag-gate.yml"
+
+
+def _scalar_to_str(value: Any, *, context: str) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (str, int, float)):
+        return str(value)
+    raise ValueError(f"{context} must be a scalar value, got {type(value).__name__}: {value!r}")
 
 
 def _required_fs_refs(matrix_json: dict[str, Any] | None) -> list[str]:
@@ -33,39 +45,131 @@ def _required_fs_refs(matrix_json: dict[str, Any] | None) -> list[str]:
     return refs
 
 
+def _parse_matrix_entry_list(raw: Any, *, job_key: str, field_name: str) -> list[dict[str, str]]:
+    if not isinstance(raw, list):
+        raise ValueError(f"Job {job_key!r} matrix.{field_name} must be a static list of mappings, got {raw!r}")
+    entries: list[dict[str, str]] = []
+    for idx, item in enumerate(raw):
+        if not isinstance(item, dict) or not item:
+            raise ValueError(f"Job {job_key!r} matrix.{field_name}[{idx}] must be a non-empty mapping")
+        entries.append(
+            {
+                str(k): _scalar_to_str(v, context=f"Job {job_key!r} matrix.{field_name}[{idx}].{k}")
+                for k, v in item.items()
+            }
+        )
+    return entries
+
+
 def _expand_job_names(
     job_key: str,
     job_cfg: dict[str, Any],
     matrix_json: dict[str, Any] | None,
 ) -> list[str]:
     base_name = job_cfg.get("name")
-    strategy = job_cfg.get("strategy") or {}
-    matrix = strategy.get("matrix")
+    if base_name is not None and not isinstance(base_name, str):
+        raise ValueError(f"Job {job_key!r} name must be a string, got {type(base_name).__name__}")
+
+    strategy = job_cfg.get("strategy")
+    if strategy is None:
+        strategy = {}
+    elif not isinstance(strategy, dict):
+        raise ValueError(f"Job {job_key!r} strategy must be a mapping, got {strategy!r}")
+
+    if "matrix" not in strategy or strategy.get("matrix") is None:
+        if base_name and ANY_EXPR_RE.search(base_name):
+            raise ValueError(f"Job {job_key!r} uses unsupported dynamic expression in name: {base_name!r}")
+        return [base_name if base_name else job_key]
+
+    matrix = strategy["matrix"]
     if not isinstance(matrix, dict) or not matrix:
-        return [str(base_name) if base_name else job_key]
+        raise ValueError(f"Job {job_key!r} strategy.matrix must be a static non-empty mapping, got {matrix!r}")
 
     axes: list[tuple[str, list[str]]] = []
     for axis_key, raw_values in matrix.items():
         if axis_key in {"include", "exclude"}:
             continue
         if isinstance(raw_values, list):
-            axes.append((axis_key, [str(v) for v in raw_values]))
+            if not raw_values:
+                raise ValueError(f"Job {job_key!r} matrix axis {axis_key!r} must not be empty")
+            axes.append(
+                (
+                    str(axis_key),
+                    [
+                        _scalar_to_str(v, context=f"Job {job_key!r} matrix.{axis_key}")
+                        for v in raw_values
+                    ],
+                )
+            )
         elif isinstance(raw_values, str) and raw_values.strip() == FS_REFS_EXPR:
-            axes.append((axis_key, _required_fs_refs(matrix_json)))
+            axes.append((str(axis_key), _required_fs_refs(matrix_json)))
         else:
             raise ValueError(
                 f"Job {job_key!r} matrix axis {axis_key!r} uses unsupported dynamic value: {raw_values!r}"
             )
 
-    names: list[str] = []
     axis_keys = [k for k, _ in axes]
-    for combo in itertools.product(*(vals for _, vals in axes)):
-        mapping = dict(zip(axis_keys, combo))
-        if base_name:
-            rendered = MATRIX_EXPR_RE.sub(lambda m: mapping[m.group(1)], str(base_name))
+    combos: list[dict[str, str]] = (
+        [dict(zip(axis_keys, combo)) for combo in itertools.product(*(vals for _, vals in axes))]
+        if axes
+        else []
+    )
+
+    if "exclude" in matrix and matrix["exclude"] is not None:
+        exclusions = _parse_matrix_entry_list(matrix["exclude"], job_key=job_key, field_name="exclude")
+        filtered: list[dict[str, str]] = []
+        for combo in combos:
+            excluded = any(
+                all(k in combo and combo[k] == v for k, v in ex.items())
+                for ex in exclusions
+            )
+            if not excluded:
+                filtered.append(combo)
+        combos = filtered
+
+    if "include" in matrix and matrix["include"] is not None:
+        inclusions = _parse_matrix_entry_list(matrix["include"], job_key=job_key, field_name="include")
+        for inc in inclusions:
+            matched_any = False
+            for combo in combos:
+                if all(combo[k] == v for k, v in inc.items() if k in combo):
+                    matched_any = True
+                    for k, v in inc.items():
+                        if k not in combo:
+                            combo[k] = v
+            if not matched_any:
+                combos.append(dict(inc))
+
+    if not combos:
+        raise ValueError(f"Job {job_key!r} matrix expanded to zero combinations")
+
+    has_matrix_expr = bool(base_name and MATRIX_EXPR_RE.search(base_name))
+    names: list[str] = []
+    for combo in combos:
+        if has_matrix_expr:
+            def _replace(match: re.Match[str], _combo: dict[str, str] = combo) -> str:
+                key = match.group(1)
+                if key not in _combo:
+                    raise ValueError(
+                        f"Job {job_key!r} name references missing matrix key {key!r} in combo {_combo!r}"
+                    )
+                return _combo[key]
+
+            rendered = MATRIX_EXPR_RE.sub(_replace, str(base_name))
+            if ANY_EXPR_RE.search(rendered):
+                raise ValueError(f"Job {job_key!r} name has unsupported expression after matrix expansion: {rendered!r}")
             names.append(rendered)
         else:
-            names.append(f"{job_key} ({', '.join(combo)})")
+            if base_name and ANY_EXPR_RE.search(base_name):
+                raise ValueError(f"Job {job_key!r} uses unsupported dynamic expression in name: {base_name!r}")
+            prefix = base_name if base_name else job_key
+            if axis_keys:
+                suffix_vals = [combo[k] for k in axis_keys if k in combo]
+                if not suffix_vals:
+                    suffix_vals = list(combo.values())
+            else:
+                suffix_vals = list(combo.values())
+            names.append(f"{prefix} ({', '.join(suffix_vals)})")
     return names
 
 
@@ -84,8 +188,13 @@ def extract_tests_job_names(
     for job_key, job_cfg in doc["jobs"].items():
         if not isinstance(job_cfg, dict):
             raise ValueError(f"Job {job_key!r} in tests.yml must be a mapping")
+        continue_on_error = job_cfg.get("continue-on-error", False)
+        if not isinstance(continue_on_error, bool):
+            raise ValueError(
+                f"Job {job_key!r} continue-on-error must be a static boolean, got {continue_on_error!r}"
+            )
         expanded = _expand_job_names(str(job_key), job_cfg, matrix_json)
-        if job_cfg.get("continue-on-error") is True:
+        if continue_on_error:
             advisory.extend(expanded)
         else:
             required.extend(expanded)
@@ -162,3 +271,30 @@ def validate_consumer_release_tag_gate(
         "expected_jobs": sorted(declared_required),
         "optional_jobs": sorted(declared_optional),
     }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Validate consumer release.yml reusable-release-tag-gate parity against tests.yml."
+    )
+    parser.add_argument("--release", type=Path, default=Path(".github/workflows/release.yml"))
+    parser.add_argument("--tests", type=Path, default=Path(".github/workflows/tests.yml"))
+    parser.add_argument("--expected-repo", required=True)
+    parser.add_argument("--matrix", type=Path, default=None)
+    parser.add_argument("--allow-local-uses", action="store_true")
+    args = parser.parse_args(argv)
+
+    matrix_json = json.loads(args.matrix.read_text(encoding="utf-8")) if args.matrix else None
+    result = validate_consumer_release_tag_gate(
+        args.release.read_text(encoding="utf-8"),
+        args.tests.read_text(encoding="utf-8"),
+        expected_repo=args.expected_repo,
+        matrix_json=matrix_json,
+        allow_local_uses=args.allow_local_uses,
+    )
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

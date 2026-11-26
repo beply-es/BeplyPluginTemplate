@@ -148,6 +148,8 @@ jobs:
                   if exc.code == 404:
                       return False
                   raise
+              if not isinstance(payload, dict):
+                  raise ValueError(f"Unexpected branch ref payload type for {ref_name}: {type(payload).__name__}")
               if payload.get("ref") == f"refs/heads/{ref_name}":
                   return True
               raise ValueError(f"Unexpected branch ref payload for {ref_name}: {payload.get('ref')!r}")
