@@ -137,6 +137,7 @@ jobs:
       - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: "24"
+          package-manager-cache: false
 
       - name: Validate immutable caller and contract identities
         env:
@@ -392,6 +393,7 @@ jobs:
       - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: "24"
+          package-manager-cache: false
 
       - name: Validate immutable contract and provenance inputs
         env:

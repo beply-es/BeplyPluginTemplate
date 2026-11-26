@@ -27,6 +27,8 @@ jobs:
   quality_contract:
     name: Quality Contract
     timeout-minutes: 10
+    permissions:
+      contents: read
     runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
 
     outputs:
@@ -56,11 +58,13 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
           node-version: '24'
+          package-manager-cache: false
 
       - name: Validate template contract
         run: node scripts/ci/validate-template-contract.mjs
@@ -87,6 +91,7 @@ jobs:
           "${RUNNER_TEMP}/contract-venv/bin/python" -m unittest scripts.ci.test_package_policy scripts.ci.test_template_sync_sha
           "${RUNNER_TEMP}/contract-venv/bin/python" -m unittest scripts.ci.test_template_pin_contract
           "${RUNNER_TEMP}/contract-venv/bin/python" -m unittest scripts.ci.test_ci_dependencies_workflow
+          "${RUNNER_TEMP}/contract-venv/bin/python" -m unittest scripts.ci.test_tests_secrets_isolation
 
       - name: Unit test one Tests run per SHA and draft PR gating
         run: python3 .github/ci/test_tests_workflow_triggers.py
@@ -109,11 +114,15 @@ jobs:
     timeout-minutes: 10
     continue-on-error: true
     if: github.event.pull_request.draft != true
+    permissions:
+      contents: read
     runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
 
     steps:
       - name: Checkout Plugin
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
 
       - name: Setup PHP
         uses: shivammathur/setup-php@accd6127cb78bee3e8082180cb391013d204ef9f # 2.37.0
@@ -129,6 +138,8 @@ jobs:
     needs: quality_contract
     timeout-minutes: 10
     if: github.event.pull_request.draft != true
+    permissions:
+      contents: read
     runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     strategy:
       fail-fast: false
@@ -142,12 +153,14 @@ jobs:
           repository: NeoRazorX/facturascripts
           ref: ${{ matrix.facturascripts-ref }}
           path: facturascripts
+          persist-credentials: false
 
       - name: Checkout Plugin
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           path: facturascripts/Plugins/${{ env.PLUGIN_FOLDER }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup PHP
         uses: shivammathur/setup-php@accd6127cb78bee3e8082180cb391013d204ef9f # 2.37.0
@@ -178,6 +191,8 @@ jobs:
     needs: [quality_contract, lint]
     if: github.event.pull_request.draft != true
     timeout-minutes: 20
+    permissions:
+      contents: read
     runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     strategy:
       fail-fast: false
@@ -192,12 +207,14 @@ jobs:
           repository: NeoRazorX/facturascripts
           ref: ${{ matrix.facturascripts-ref }}
           path: facturascripts
+          persist-credentials: false
 
       - name: Checkout Plugin
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           path: facturascripts/Plugins/${{ env.PLUGIN_FOLDER }}
           fetch-depth: 0
+          persist-credentials: false
 
       # Solo el NOMBRE y si existe (true/false): el valor no llega a este paso. Un secreto que
       # falta es rojo con su nombre, nunca un checkout anónimo.
@@ -339,11 +356,37 @@ jobs:
             --coverage-clover=coverage.xml \
             --coverage-text
 
+      - name: Upload coverage artifact
+        if: steps.unit-targets.outputs.has_tests == 'true' && matrix.php-version == '8.2' && matrix.facturascripts-ref == fromJSON(needs.quality_contract.outputs.fs_refs)[0]
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.PLUGIN_FOLDER }}-coverage
+          path: facturascripts/coverage.xml
+          if-no-files-found: warn
+          retention-days: 1
+
+  coverage-upload:
+    name: Upload Coverage
+    needs: [quality_contract, unit]
+    if: github.event.pull_request.draft != true
+    timeout-minutes: 10
+    runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
+    permissions:
+      contents: read
+    steps:
+      - name: Download coverage artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: ${{ env.PLUGIN_FOLDER }}-coverage
+          path: coverage-artifacts
+          merge-multiple: true
+
       - name: Upload coverage to Codecov
-        if: steps.unit-targets.outputs.has_tests == 'true'
         uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
         with:
-          files: facturascripts/coverage.xml
+          files: coverage-artifacts/coverage.xml
+          disable_search: true
+          plugins: noop
           flags: unittests
           name: ${{ env.PLUGIN_FOLDER }}-coverage
           fail_ci_if_error: false
@@ -356,6 +399,8 @@ jobs:
     needs: [quality_contract, lint]
     if: github.event.pull_request.draft != true
     timeout-minutes: 20
+    permissions:
+      contents: read
     runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     strategy:
       fail-fast: false
@@ -370,12 +415,14 @@ jobs:
           repository: NeoRazorX/facturascripts
           ref: ${{ matrix.facturascripts-ref }}
           path: facturascripts
+          persist-credentials: false
 
       - name: Checkout Plugin
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           path: facturascripts/Plugins/${{ env.PLUGIN_FOLDER }}
           fetch-depth: 0
+          persist-credentials: false
 
       # Solo el NOMBRE y si existe (true/false): el valor no llega a este paso. Un secreto que
       # falta es rojo con su nombre, nunca un checkout anónimo.
@@ -542,6 +589,8 @@ jobs:
     needs: [quality_contract, lint]
     if: github.event.pull_request.draft != true
     timeout-minutes: 25
+    permissions:
+      contents: read
     runs-on: ${{ github.repository == 'beply-es/BeplyPluginTemplate' && 'ubuntu-24.04' || vars.BEPLY_GHA_RUNNER == 'arc-runner-prio' && 'arc-runner-prio' || 'arc-runner-set' }}
     strategy:
       fail-fast: false
@@ -557,12 +606,14 @@ jobs:
           repository: NeoRazorX/facturascripts
           ref: ${{ matrix.facturascripts-ref }}
           path: facturascripts
+          persist-credentials: false
 
       - name: Checkout Plugin
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           path: facturascripts/Plugins/${{ env.PLUGIN_FOLDER }}
           fetch-depth: 0
+          persist-credentials: false
 
       # Solo el NOMBRE y si existe (true/false): el valor no llega a este paso. Un secreto que
       # falta es rojo con su nombre, nunca un checkout anónimo.
@@ -658,6 +709,7 @@ jobs:
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
           node-version: '24'
+          package-manager-cache: false
 
       - name: Install Composer dependencies
         if: steps.e2e-targets.outputs.has_tests == 'true'
