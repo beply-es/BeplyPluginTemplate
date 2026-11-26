@@ -14,7 +14,7 @@ const SECRET = /^BEPLY_[A-Z0-9]+(?:_[A-Z0-9]+)*_READ_KEY$/
 const TOP_KEYS = new Set(['schema', 'plugins'])
 const PLUGIN_KEYS = new Set(['repository', 'ref', 'folder', 'sshKeySecret'])
 
-function readDependencies(pluginFolder) {
+function readDependencies(pluginFolder, ownRepository) {
   if (!existsSync(FILE)) return []
   let data
   try {
@@ -43,13 +43,17 @@ function readDependencies(pluginFolder) {
     if (typeof sshKeySecret !== 'string' || !SECRET.test(sshKeySecret)) {
       throw new Error(`${where}: sshKeySecret debe ser el nombre de una clave de lectura BEPLY_<REPO>_READ_KEY`)
     }
-    if (folder === pluginFolder || repository === `beply-es/${pluginFolder}`) {
+    // GitHub resuelve los nombres de repositorio sin distinguir mayúsculas, y el repo puede no llamarse como la
+    // carpeta (maisons -> MaisonsIntegration): se compara en minúsculas con los dos.
+    const repoKey = repository.toLowerCase()
+    if (folder === pluginFolder || repoKey === `beply-es/${pluginFolder}`.toLowerCase()
+        || (ownRepository && repoKey === ownRepository.toLowerCase())) {
       throw new Error(`${where}: no puede ser el propio plugin`)
     }
     if (folders.has(folder)) throw new Error(`${where}: folder repetida ${folder}`)
-    if (repositories.has(repository)) throw new Error(`${where}: repository repetido ${repository}`)
+    if (repositories.has(repoKey)) throw new Error(`${where}: repository repetido ${repository}`)
     folders.add(folder)
-    repositories.add(repository)
+    repositories.add(repoKey)
     return { repository, ref, folder, sshKeySecret }
   })
 }
@@ -57,7 +61,11 @@ function readDependencies(pluginFolder) {
 try {
   const pluginFolder = process.env.PLUGIN_FOLDER || ''
   if (!FOLDER.test(pluginFolder)) throw new Error('PLUGIN_FOLDER ausente o inválido')
-  const dependencies = readDependencies(pluginFolder)
+  const ownRepository = process.env.GITHUB_REPOSITORY || ''
+  if (process.env.GITHUB_ACTIONS === 'true' && !ownRepository) {
+    throw new Error('GITHUB_REPOSITORY ausente: sin él no se puede descartar el propio repo')
+  }
+  const dependencies = readDependencies(pluginFolder, ownRepository)
   const lines = [
     `has_dependencies=${dependencies.length > 0}`,
     `plugin_folders=${[pluginFolder, ...dependencies.map((item) => item.folder)].join(',')}`,
