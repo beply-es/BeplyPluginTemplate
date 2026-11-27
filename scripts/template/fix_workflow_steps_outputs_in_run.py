@@ -44,13 +44,37 @@ class InvalidWorkflowYamlError(RuntimeError):
 STEPS_OUTPUT_EXPR_RE = re.compile(
     r'\$\{\{\s*steps\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)\s*\}\}'
 )
-ANY_STEPS_OUTPUT_EXPR_RE = re.compile(
-    r'\$\{\{[^}]*steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+[^}]*\}\}'
+SIMPLE_UNTRUSTED_EXPR_RE = re.compile(
+    r'\$\{\{\s*('
+    r'steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+'
+    r'|inputs\.[A-Za-z0-9_-]+'
+    r'|github\.event\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*'
+    r'|github\.(?:head_ref|base_ref|ref_name)'
+    r')\s*\}\}'
 )
-POST_TRANSFORM_RESIDUAL_RE = re.compile(
-    r'\$\{\{[^}]*\b(?:steps|needs)\.[^}]*\.outputs\b[^}]*\}\}',
+UNTRUSTED_EXPR_RE = re.compile(
+    r'\$\{\{(?:\}(?!\})|[^}])*(?:'
+    r'\b(?:steps|needs)\.(?:\}(?!\})|[^}])+\.outputs\b'
+    r'|\binputs(?:\.|\[)|\btoJSON\s*\(\s*inputs\s*\)'
+    r'|\bgithub\.event\b'
+    r'|\bgithub\.head_ref\b'
+    r'|\bgithub\.base_ref\b'
+    r'|\bgithub\.ref_name\b'
+    r')(?:\}(?!\})|[^}])*\}\}',
     re.DOTALL,
 )
+ANY_STEPS_OUTPUT_EXPR_RE = re.compile(
+    r'\$\{\{(?:\}(?!\})|[^}])*(?:'
+    r'steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+'
+    r'|\binputs(?:\.|\[)|\btoJSON\s*\(\s*inputs\s*\)'
+    r'|\bgithub\.event\b'
+    r'|\bgithub\.head_ref\b'
+    r'|\bgithub\.base_ref\b'
+    r'|\bgithub\.ref_name\b'
+    r')(?:\}(?!\})|[^}])*\}\}',
+    re.DOTALL,
+)
+POST_TRANSFORM_RESIDUAL_RE = UNTRUSTED_EXPR_RE
 
 CANONICAL_ENV_NAMES: dict[tuple[str, str], str] = {
     ('ini', 'name'): 'PLUGIN_NAME',
@@ -95,21 +119,29 @@ CONTRACT_TEST_SOURCE = '''#!/usr/bin/env python3
 
 Cubre `steps.*.outputs`, `needs.*.outputs`, `inputs.*` / `inputs['...']` / `toJSON(inputs)`,
 `github.event` (incl. `github.event.*`, `github.event['...']`, `toJSON(github.event)`),
-`github.head_ref`, `github.base_ref`, `github.ref_name` y expresiones con llaves internas como
-`format('{0}', ...)`.
+`github.head_ref`, `github.base_ref`, `github.ref_name`, expresiones con llaves internas como
+`format('{0}', ...)`, y sinks de doble evaluación (`eval`, `bash/sh/zsh/dash -c`, `ssh`, `su -c`,
+`xargs sh/bash`, `| sh`/`| bash`, `bash/sh <<<`, `source <(...)`/`. <(...)`, y continuaciones
+multilínea con backslash) alimentados con variables `env:` (workflow, job o step) derivadas de contextos
+untrusted.
 
 Límites conocidos del detector:
 - Solo inspecciona archivos bajo `.github/workflows` (`*.yml` / `*.yaml`).
 - En modo fallback sin PyYAML (`yaml is None`), no cubre flow mappings (`{ run: ... }`) ni anclas YAML.
-- En ambos modos (PyYAML y fallback), no sigue cadenas entre comillas multilínea ni formas indirectas
-  de `steps`/`needs` como `steps['a'].outputs` o `toJSON(steps)`.
+- En ambos modos (PyYAML y fallback), no cubre intérpretes externos (`python3 -c`, `node -e`, `awk`),
+  cadenas entre comillas multilínea, reasignaciones indirectas de variables shell hacia sinks
+  (`tmp="$INPUT_X"; eval "$tmp"`), ni formas indirectas de `steps`/`needs` como `steps['a'].outputs`
+  o `toJSON(steps)`.
 """
 
 from __future__ import annotations
 
 import re
+import sys
 import unittest
 from pathlib import Path
+
+sys.dont_write_bytecode = True
 
 try:
     import yaml
@@ -133,6 +165,149 @@ STEPS_OUTPUTS_RE = re.compile(
     + r')(?:\\}(?!\\})|[^}])*\\}\\}',
     re.DOTALL,
 )
+SHELL_EVAL_SINK_PATTERNS = (
+    r'(?:^|[;|&(`]|\\s)eval(?:\\s|$)',
+    r'(?:^|[;|&(`]|\\s)(?:/[^\\s;|&]*?/)?(?:bash|sh|zsh|dash)\\b[^#\\n;|&]*\\s-[a-zA-Z]*c\\b',
+    r'(?:^|[;|&(`]|\\s)(?:/[^\\s;|&]*?/)?ssh(?:\\s|$)',
+    r'(?:^|[;|&(`]|\\s)(?:/[^\\s;|&]*?/)?su\\b[^#\\n;|&]*\\s-[a-zA-Z]*c\\b',
+    r'(?:^|[;|&(`]|\\s)(?:/[^\\s;|&]*?/)?xargs\\b[^#\\n;|&]*\\s(?:/[^\\s;|&]*?/)?(?:bash|sh|zsh|dash)\\b',
+    r'\\|\\s*(?:/[^\\s;|&]*?/)?(?:bash|sh|zsh|dash)\\b',
+    r'(?:^|[;|&(`]|\\s)(?:/[^\\s;|&]*?/)?(?:bash|sh|zsh|dash)\\b[^#\\n;|&]*<<<',
+    r'(?:^|[;|&(`]|\\s)(?:source|\\.)\\s+<\\(',
+)
+SHELL_EVAL_SINK_RE = re.compile('|'.join(SHELL_EVAL_SINK_PATTERNS))
+
+
+def _join_shell_continuations(run_text: str) -> list[str]:
+    logical: list[str] = []
+    buf: list[str] = []
+    for raw in run_text.splitlines():
+        if not buf and raw.lstrip().startswith('#'):
+            continue
+        stripped_right = raw.rstrip()
+        if stripped_right.endswith('\\\\') and not stripped_right.endswith('\\\\\\\\'):
+            buf.append(stripped_right[:-1])
+            continue
+        if buf:
+            buf.append(raw.lstrip())
+            logical.append(' '.join(buf))
+            buf = []
+        else:
+            logical.append(raw)
+    if buf:
+        logical.append(' '.join(buf))
+    return logical
+
+
+def _find_shell_eval_sink_vars(run_text: str, untrusted_env_vars: set[str]) -> list[str]:
+    if not untrusted_env_vars:
+        return []
+    found: set[str] = set()
+    for line in _join_shell_continuations(run_text):
+        if line.lstrip().startswith('#'):
+            continue
+        if not SHELL_EVAL_SINK_RE.search(line):
+            continue
+        for var in untrusted_env_vars:
+            if re.search(rf'\\$(?:\\{{{re.escape(var)}\\}}|{re.escape(var)}\\b)', line):
+                found.add(var)
+    return sorted(found)
+
+
+def _collect_env_block_vars(lines: list[str], env_line_idx: int, env_indent: int) -> set[str]:
+    found: set[str] = set()
+    k = env_line_idx + 1
+    while k < len(lines):
+        el = lines[k]
+        if el.strip() == '':
+            k += 1
+            continue
+        el_indent = len(el) - len(el.lstrip(' '))
+        if el_indent <= env_indent:
+            break
+        m_kv = re.match(r'^\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*:(.*)$', el)
+        if m_kv and STEPS_OUTPUTS_RE.search(m_kv.group(2)):
+            found.add(m_kv.group(1))
+        k += 1
+    return found
+
+
+def _extract_untrusted_env_vars_from_lines(lines: list[str], start_idx: int, key_indent: int) -> set[str]:
+    untrusted: set[str] = set()
+
+    # 1. Workflow-level env: (indent 0)
+    for k, ln in enumerate(lines):
+        if re.match(r'^env\\s*:\\s*$', ln):
+            untrusted.update(_collect_env_block_vars(lines, k, 0))
+
+    # 2. Enclosing job-level env: (same indent as enclosing steps:)
+    steps_line_idx: int | None = None
+    steps_indent = -1
+    for k in range(start_idx - 1, -1, -1):
+        ln = lines[k]
+        if ln.strip() == '':
+            continue
+        ind = len(ln) - len(ln.lstrip(' '))
+        if ind < key_indent and re.match(r'^\\s*steps\\s*:\\s*$', ln):
+            steps_line_idx = k
+            steps_indent = ind
+            break
+    if steps_line_idx is not None:
+        job_start = steps_line_idx
+        while job_start > 0:
+            prev = lines[job_start - 1]
+            if prev.strip() == '':
+                job_start -= 1
+                continue
+            if len(prev) - len(prev.lstrip(' ')) < steps_indent:
+                break
+            job_start -= 1
+        job_end = steps_line_idx + 1
+        while job_end < len(lines):
+            nxt = lines[job_end]
+            if nxt.strip() == '':
+                job_end += 1
+                continue
+            if len(nxt) - len(nxt.lstrip(' ')) < steps_indent:
+                break
+            job_end += 1
+        for k in range(job_start, job_end):
+            ln = lines[k]
+            if len(ln) - len(ln.lstrip(' ')) == steps_indent and re.match(r'^\\s*env\\s*:\\s*$', ln):
+                untrusted.update(_collect_env_block_vars(lines, k, steps_indent))
+
+    # 3. Current step-level env: (before or after run:)
+    step_start = start_idx
+    while step_start > 0:
+        prev = lines[step_start - 1]
+        if prev.strip() == '':
+            step_start -= 1
+            continue
+        prev_indent = len(prev) - len(prev.lstrip(' '))
+        if prev_indent < key_indent:
+            if re.match(r'^\\s*-\\s+', prev) and prev_indent >= key_indent - 2:
+                step_start -= 1
+            break
+        step_start -= 1
+
+    step_end = start_idx + 1
+    while step_end < len(lines):
+        nxt = lines[step_end]
+        if nxt.strip() == '':
+            step_end += 1
+            continue
+        nxt_indent = len(nxt) - len(nxt.lstrip(' '))
+        if nxt_indent < key_indent:
+            break
+        if nxt_indent == key_indent and re.match(r'^\\s*-\\s+', nxt):
+            break
+        step_end += 1
+
+    for k in range(step_start, step_end):
+        m_env = re.match(r'^(\\s*(?:-\\s+)?)env\\s*:\\s*$', lines[k])
+        if m_env:
+            untrusted.update(_collect_env_block_vars(lines, k, len(m_env.group(1))))
+    return untrusted
 
 
 def _find_with_pyyaml(workflow_text: str, workflow_name: str) -> list[str]:
@@ -141,6 +316,7 @@ def _find_with_pyyaml(workflow_text: str, workflow_name: str) -> list[str]:
         return []
 
     violations: list[str] = []
+    workflow_env = data.get('env') if isinstance(data.get('env'), dict) else {}
     jobs = data.get('jobs') or {}
     if not isinstance(jobs, dict):
         return []
@@ -148,6 +324,7 @@ def _find_with_pyyaml(workflow_text: str, workflow_name: str) -> list[str]:
     for job_id, job in jobs.items():
         if not isinstance(job, dict):
             continue
+        job_env = job.get('env') if isinstance(job.get('env'), dict) else {}
         steps = job.get('steps') or []
         if not isinstance(steps, list):
             continue
@@ -155,12 +332,24 @@ def _find_with_pyyaml(workflow_text: str, workflow_name: str) -> list[str]:
             if not isinstance(step, dict):
                 continue
             step_label = step.get('name') or f'step[{idx}]'
+            step_env = step.get('env') if isinstance(step.get('env'), dict) else {}
+            merged_env = {**workflow_env, **job_env, **step_env}
+            untrusted_env_vars = {
+                k
+                for k, v in merged_env.items()
+                if isinstance(k, str) and isinstance(v, str) and STEPS_OUTPUTS_RE.search(v)
+            }
             run_script = step.get('run')
             if isinstance(run_script, str):
                 matches = STEPS_OUTPUTS_RE.findall(run_script)
                 if matches:
                     violations.append(
                         f'{workflow_name} :: job {job_id} :: {step_label!r} (run) -> {sorted(set(matches))}'
+                    )
+                sink_vars = _find_shell_eval_sink_vars(run_script, untrusted_env_vars)
+                if sink_vars:
+                    violations.append(
+                        f'{workflow_name} :: job {job_id} :: {step_label!r} (run shell-eval-sink) -> {sink_vars}'
                     )
             with_cfg = step.get('with')
             if isinstance(with_cfg, dict):
@@ -194,6 +383,13 @@ def _find_fallback(workflow_text: str, workflow_name: str) -> list[str]:
                 violations.append(
                     f'{workflow_name} :: line {i + 1} ({key_label}) -> {sorted(set(matches))}'
                 )
+            if key_name == 'run':
+                untrusted_env_vars = _extract_untrusted_env_vars_from_lines(lines, i, key_indent)
+                sink_vars = _find_shell_eval_sink_vars(rest, untrusted_env_vars)
+                if sink_vars:
+                    violations.append(
+                        f'{workflow_name} :: line {i + 1} (run shell-eval-sink) -> {sink_vars}'
+                    )
             i += 1
             continue
         block_lines: list[str] = []
@@ -214,6 +410,13 @@ def _find_fallback(workflow_text: str, workflow_name: str) -> list[str]:
             violations.append(
                 f'{workflow_name} :: line {i + 1} ({key_label}) -> {sorted(set(matches))}'
             )
+        if key_name == 'run':
+            untrusted_env_vars = _extract_untrusted_env_vars_from_lines(lines, i, key_indent)
+            sink_vars = _find_shell_eval_sink_vars('\\n'.join(block_lines), untrusted_env_vars)
+            if sink_vars:
+                violations.append(
+                    f'{workflow_name} :: line {i + 1} (run shell-eval-sink) -> {sink_vars}'
+                )
         i = j
     return violations
 
@@ -505,6 +708,83 @@ jobs:
                 self.assertEqual(1, len(violations))
                 self.assertIn('github.event.pull_request.title', violations[0])
 
+    def test_rejects_untrusted_env_in_shell_eval_sinks(self) -> None:
+        sinks = (
+            ('eval', 'eval "echo ${INPUT_X}"'),
+            ('bash_c', 'bash -c "echo ${INPUT_X}"'),
+            ('abs_bash_c', '/bin/bash -c "echo ${INPUT_X}"'),
+            ('sh_c', 'sh -lc "echo ${INPUT_X}"'),
+            ('zsh_c', 'zsh -c "echo ${INPUT_X}"'),
+            ('dash_c', 'dash -ec "echo ${INPUT_X}"'),
+            ('ssh', 'ssh deploy@host "echo ${INPUT_X}"'),
+            ('su_c', 'su www-data -c "echo ${INPUT_X}"'),
+            ('xargs_sh', 'echo "${INPUT_X}" | xargs bash'),
+            ('pipe_sh', 'echo "${INPUT_X}" | sh'),
+            ('pipe_abs_bash', 'echo "${INPUT_X}" | /bin/bash'),
+            ('herestring_bash', 'bash <<< "${INPUT_X}"'),
+            ('source_procsub', 'source <(echo "${INPUT_X}")'),
+            ('dot_procsub', '. <(echo "${INPUT_X}")'),
+            ('multiline_bash_c', 'bash -c \\\\\\n          "echo ${INPUT_X}"'),
+        )
+        for sink_name, cmd in sinks:
+            wf = f"""
+name: Sink {sink_name}
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sink step
+        env:
+          INPUT_X: ${{{{ inputs.x }}}}
+        run: |
+          {cmd}
+"""
+            for mode, detector in self._detectors():
+                with self.subTest(sink=sink_name, mode=mode):
+                    violations = detector(wf, f'sink-{sink_name}.yml')
+                    self.assertEqual(1, len(violations))
+                    self.assertIn('shell-eval-sink', violations[0])
+
+        scoped_workflows = (
+            (
+                'workflow_env',
+                """name: Workflow Env Sink
+on: workflow_dispatch
+env:
+  WF_X: ${{ inputs.x }}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sink workflow env
+        run: |
+          eval "echo $WF_X"
+""",
+            ),
+            (
+                'job_env',
+                """name: Job Env Sink
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      JOB_X: ${{ inputs.y }}
+    steps:
+      - name: Sink job env
+        run: |
+          eval "echo $JOB_X"
+""",
+            ),
+        )
+        for scope_name, scoped_wf in scoped_workflows:
+            for mode, detector in self._detectors():
+                with self.subTest(scope=scope_name, mode=mode):
+                    violations = detector(scoped_wf, f'{scope_name}.yml')
+                    self.assertEqual(1, len(violations))
+                    self.assertIn('shell-eval-sink', violations[0])
+
     def test_allows_steps_outputs_passed_via_env(self) -> None:
         safe_workflow = """
 name: Safe
@@ -578,6 +858,22 @@ def _canonical_env_name(step_id: str, output_name: str) -> str:
     return f'STEP_{clean_step}_{clean_out}'
 
 
+def _canonical_env_name_for_expr(expr_body: str) -> str:
+    m_step = re.fullmatch(r'steps\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)', expr_body)
+    if m_step:
+        return _canonical_env_name(m_step.group(1), m_step.group(2))
+    if expr_body.startswith('inputs.'):
+        clean_in = re.sub(r'[^A-Za-z0-9]+', '_', expr_body[len('inputs.') :]).strip('_').upper()
+        return f'INPUT_{clean_in}'
+    if expr_body.startswith('github.event.'):
+        clean_ev = re.sub(r'[^A-Za-z0-9]+', '_', expr_body[len('github.event.') :]).strip('_').upper()
+        return f'GH_EVENT_{clean_ev}'
+    if expr_body.startswith('github.'):
+        clean_gh = re.sub(r'[^A-Za-z0-9]+', '_', expr_body[len('github.') :]).strip('_').upper()
+        return f'GITHUB_{clean_gh}'
+    return re.sub(r'[^A-Za-z0-9]+', '_', expr_body).strip('_').upper()
+
+
 def _quote_context(line: str, match_start: int) -> str:
     """Return shell quote context at match_start: 'single', 'double', or 'none'.
 
@@ -632,8 +928,8 @@ def _is_directly_single_quoted(line: str, start: int, end: int) -> bool:
     return start > 0 and end < len(line) and line[start - 1] == "'" and line[end] == "'"
 
 
-def _replace_in_run_line(line: str, mapping: dict[tuple[str, str], str]) -> str:
-    """Replace all simple ${{ steps.X.outputs.Y }} in a run: line respecting original quotes.
+def _replace_in_run_line(line: str, mapping: dict[str, str]) -> str:
+    """Replace all simple untrusted expressions in a run: line respecting original quotes.
 
     - Unquoted -> "${VAR}" for single-value vars (e.g. -c "${PHPUNIT_CONFIG}"); *_TARGETS stay
       unquoted as ${VAR} intentionally for bash word-splitting (shell never executes $(...)).
@@ -643,8 +939,8 @@ def _replace_in_run_line(line: str, mapping: dict[tuple[str, str], str]) -> str:
     """
     out_parts: list[str] = []
     pos = 0
-    for m in STEPS_OUTPUT_EXPR_RE.finditer(line):
-        key = (m.group(1), m.group(2))
+    for m in SIMPLE_UNTRUSTED_EXPR_RE.finditer(line):
+        key = m.group(1)
         var_name = mapping[key]
         start, end = m.span()
         ctx = _quote_context(line, start)
@@ -701,17 +997,75 @@ def _get_mapping_pair(
     return None
 
 
-def _normalize_expr(expr: str) -> tuple[str, str] | None:
-    m = STEPS_OUTPUT_EXPR_RE.fullmatch(expr.strip())
+def _normalize_expr(expr: str) -> str | None:
+    m = SIMPLE_UNTRUSTED_EXPR_RE.fullmatch(expr.strip())
     if not m:
         return None
-    return (m.group(1), m.group(2))
+    return m.group(1)
 
 
 POSIX_SHELL_NAMES = frozenset({'bash', 'sh', 'dash', 'zsh'})
 HEREDOC_START_RE = re.compile(
     r'(?<!<)<<(?!<)(-?)\s*(?:(["\'])([A-Za-z0-9_.-]+)\2|\\?([A-Za-z0-9_.-]+))'
 )
+SHELL_EVAL_SINK_PATTERNS = (
+    r'(?:^|[;|&(`]|\s)eval(?:\s|$)',
+    r'(?:^|[;|&(`]|\s)(?:/[^\s;|&]*?/)?(?:bash|sh|zsh|dash)\b[^#\n;|&]*\s-[a-zA-Z]*c\b',
+    r'(?:^|[;|&(`]|\s)(?:/[^\s;|&]*?/)?ssh(?:\s|$)',
+    r'(?:^|[;|&(`]|\s)(?:/[^\s;|&]*?/)?su\b[^#\n;|&]*\s-[a-zA-Z]*c\b',
+    r'(?:^|[;|&(`]|\s)(?:/[^\s;|&]*?/)?xargs\b[^#\n;|&]*\s(?:/[^\s;|&]*?/)?(?:bash|sh|zsh|dash)\b',
+    r'\|\s*(?:/[^\s;|&]*?/)?(?:bash|sh|zsh|dash)\b',
+    r'(?:^|[;|&(`]|\s)(?:/[^\s;|&]*?/)?(?:bash|sh|zsh|dash)\b[^#\n;|&]*<<<',
+    r'(?:^|[;|&(`]|\s)(?:source|\.)\s+<\(',
+)
+SHELL_EVAL_SINK_RE = re.compile('|'.join(SHELL_EVAL_SINK_PATTERNS))
+RESERVED_RUNNER_ENV_PREFIXES = ('GITHUB_', 'RUNNER_', 'ACTIONS_')
+RESERVED_RUNNER_ENV_EXACT = frozenset({'CI'})
+ALLOWED_RUNNER_MIRROR_ENV_NAMES = frozenset({
+    'GITHUB_HEAD_REF',
+    'GITHUB_BASE_REF',
+    'GITHUB_REF_NAME',
+})
+
+
+def _is_reserved_runner_env_name(var_name: str) -> bool:
+    if var_name in ALLOWED_RUNNER_MIRROR_ENV_NAMES:
+        return False
+    if var_name in RESERVED_RUNNER_ENV_EXACT:
+        return True
+    return var_name.startswith(RESERVED_RUNNER_ENV_PREFIXES)
+
+
+def _join_shell_continuations(run_script: str) -> list[str]:
+    logical: list[str] = []
+    buf: list[str] = []
+    for raw in run_script.splitlines():
+        if not buf and raw.lstrip().startswith('#'):
+            continue
+        stripped_right = raw.rstrip()
+        if stripped_right.endswith('\\') and not stripped_right.endswith('\\\\'):
+            buf.append(stripped_right[:-1])
+            continue
+        if buf:
+            buf.append(raw.lstrip())
+            logical.append(' '.join(buf))
+            buf = []
+        else:
+            logical.append(raw)
+    if buf:
+        logical.append(' '.join(buf))
+    return logical
+
+
+def _find_shell_eval_sink_expressions(run_script: str) -> list[str]:
+    """Return untrusted expressions appearing on a line with a double-evaluation shell sink."""
+    found: list[str] = []
+    for line in _join_shell_continuations(run_script):
+        if line.lstrip().startswith('#'):
+            continue
+        if SHELL_EVAL_SINK_RE.search(line):
+            found.extend(UNTRUSTED_EXPR_RE.findall(line))
+    return sorted(set(found))
 
 
 def _is_posix_shell(shell_value: str | None) -> bool:
@@ -864,10 +1218,24 @@ def analyze_and_transform_workflow_text(
                 )
                 continue
 
-            # C3: Fail-closed on compound expressions inside run:
+            # C1: Fail-closed on double-evaluation shell sinks (eval, bash/sh/zsh/dash -c, ssh, su -c, xargs sh).
+            sink_exprs = _find_shell_eval_sink_expressions(run_v.value)
+            if sink_exprs:
+                warnings.append(
+                    {
+                        'kind': 'unsupported_shell_eval_sink',
+                        'workflow': workflow_name,
+                        'job': job_id,
+                        'step': step_label,
+                        'expressions': sink_exprs,
+                    }
+                )
+                continue
+
+            # C3: Fail-closed on compound or non-rewritable untrusted expressions inside run:
             all_any_matches = ANY_STEPS_OUTPUT_EXPR_RE.findall(run_v.value)
             unsupported_exprs = [
-                expr for expr in all_any_matches if not STEPS_OUTPUT_EXPR_RE.fullmatch(expr)
+                expr for expr in all_any_matches if not SIMPLE_UNTRUSTED_EXPR_RE.fullmatch(expr)
             ]
             if unsupported_exprs:
                 warnings.append(
@@ -881,19 +1249,19 @@ def analyze_and_transform_workflow_text(
                 )
                 continue
 
-            pairs_in_order: list[tuple[str, str]] = []
-            seen: set[tuple[str, str]] = set()
-            for m in STEPS_OUTPUT_EXPR_RE.finditer(run_v.value):
-                pair = (m.group(1), m.group(2))
-                if pair not in seen:
-                    seen.add(pair)
-                    pairs_in_order.append(pair)
-            if not pairs_in_order:
+            exprs_in_order: list[str] = []
+            seen: set[str] = set()
+            for m in SIMPLE_UNTRUSTED_EXPR_RE.finditer(run_v.value):
+                expr_body = m.group(1)
+                if expr_body not in seen:
+                    seen.add(expr_body)
+                    exprs_in_order.append(expr_body)
+            if not exprs_in_order:
                 continue
 
             # Inspect existing env: mapping on this step
             env_pair = _get_mapping_pair(step_node, 'env')
-            existing_by_expr: dict[tuple[str, str], str] = {}
+            existing_by_expr: dict[str, str] = {}
             used_env_names: set[str] = set()
             if env_pair and isinstance(env_pair[1], yaml.MappingNode):
                 for ek, ev in env_pair[1].value:
@@ -904,27 +1272,43 @@ def analyze_and_transform_workflow_text(
                             if norm is not None:
                                 existing_by_expr[norm] = ek.value
 
-            expr_to_var: dict[tuple[str, str], str] = {}
+            expr_to_var: dict[str, str] = {}
             new_env_entries: list[tuple[str, str]] = []
-            for pair in pairs_in_order:
-                if pair in existing_by_expr:
-                    expr_to_var[pair] = existing_by_expr[pair]
+            reserved_collision = False
+            for expr_body in exprs_in_order:
+                if expr_body in existing_by_expr:
+                    expr_to_var[expr_body] = existing_by_expr[expr_body]
                     continue
-                base_name = _canonical_env_name(pair[0], pair[1])
+                base_name = _canonical_env_name_for_expr(expr_body)
                 candidate = base_name
                 suffix = 2
                 while candidate in used_env_names:
                     candidate = f'{base_name}_{suffix}'
                     suffix += 1
+                if _is_reserved_runner_env_name(candidate):
+                    warnings.append(
+                        {
+                            'kind': 'reserved_runner_env_name',
+                            'workflow': workflow_name,
+                            'job': job_id,
+                            'step': step_label,
+                            'env_name': candidate,
+                            'expressions': [f'${{{{ {expr_body} }}}}'],
+                        }
+                    )
+                    reserved_collision = True
+                    break
                 used_env_names.add(candidate)
-                expr_to_var[pair] = candidate
-                new_env_entries.append((candidate, f'${{{{ steps.{pair[0]}.outputs.{pair[1]} }}}}'))
+                expr_to_var[expr_body] = candidate
+                new_env_entries.append((candidate, f'${{{{ {expr_body} }}}}'))
+            if reserved_collision:
+                continue
 
             # Rewrite ONLY the lines belonging to run_v
             run_start, run_end = _node_line_span(run_v)
             for idx in range(run_start, min(run_end, len(lines))):
                 raw = lines[idx]
-                if not STEPS_OUTPUT_EXPR_RE.search(raw):
+                if not SIMPLE_UNTRUSTED_EXPR_RE.search(raw):
                     continue
                 newline = '\n' if raw.endswith('\n') else ''
                 body = raw[:-1] if newline else raw
@@ -1141,6 +1525,26 @@ class GeneratorResult:
     eligible_for_batch: bool = True
 
 
+def _ensure_gitignore_pyc_rules(content: str) -> str:
+    """Ensure .gitignore contains __pycache__/ and *.pyc (idempotent)."""
+    existing = {
+        line.strip()
+        for line in content.splitlines()
+        if line.strip() and not line.lstrip().startswith('#')
+    }
+    missing: list[str] = []
+    if '__pycache__/' not in existing and '__pycache__' not in existing:
+        missing.append('__pycache__/')
+    if '*.pyc' not in existing and '*.py[cod]' not in existing:
+        missing.append('*.pyc')
+    if not missing:
+        return content
+    prefix = content
+    if prefix and not prefix.endswith('\n'):
+        prefix += '\n'
+    return prefix + '\n'.join(missing) + '\n'
+
+
 def process_repository(
     repo_root: Path,
     *,
@@ -1159,6 +1563,14 @@ def process_repository(
     workflows_dir = repo_root / '.github' / 'workflows'
     changes: dict[str, tuple[str, str]] = {}
     warnings: list[dict[str, Any]] = []
+
+    scripts_ci_dir = repo_root / 'scripts' / 'ci'
+    if scripts_ci_dir.is_dir():
+        stale_pyc = sorted(
+            p.relative_to(repo_root).as_posix() for p in scripts_ci_dir.rglob('*.pyc')
+        )
+        if stale_pyc:
+            warnings.append({'kind': 'unclean_pyc_artifacts', 'files': stale_pyc})
 
     if workflows_dir.is_dir():
         wf_files = sorted(
@@ -1196,6 +1608,12 @@ def process_repository(
         after = CONTRACT_TEST_SOURCE
         if after != before:
             changes[rel] = (before, after)
+
+        gitignore_path = repo_root / '.gitignore'
+        gi_before = gitignore_path.read_text(encoding='utf-8') if gitignore_path.is_file() else ''
+        gi_after = _ensure_gitignore_pyc_rules(gi_before)
+        if gi_after != gi_before:
+            changes['.gitignore'] = (gi_before, gi_after)
 
     normalized_diff, digest = compute_normalized_diff(changes, resolved_name)
 
