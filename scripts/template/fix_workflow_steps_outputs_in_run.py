@@ -48,6 +48,7 @@ SIMPLE_UNTRUSTED_EXPR_RE = re.compile(
     r'\$\{\{\s*('
     r'steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+'
     r'|inputs\.[A-Za-z0-9_-]+'
+    r'|env\.[A-Za-z_][A-Za-z0-9_]*'
     r'|github\.event\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*'
     r'|github\.(?:head_ref|base_ref|ref_name)'
     r')\s*\}\}'
@@ -56,6 +57,7 @@ UNTRUSTED_EXPR_RE = re.compile(
     r'\$\{\{(?:\}(?!\})|[^}])*(?:'
     r'\b(?:steps|needs)\.(?:\}(?!\})|[^}])+\.outputs\b'
     r'|\binputs(?:\.|\[)|\btoJSON\s*\(\s*inputs\s*\)'
+    r'|\benv(?:\.|\[)|\btoJSON\s*\(\s*env\s*\)'
     r'|\bgithub\.event\b'
     r'|\bgithub\.head_ref\b'
     r'|\bgithub\.base_ref\b'
@@ -67,6 +69,7 @@ ANY_STEPS_OUTPUT_EXPR_RE = re.compile(
     r'\$\{\{(?:\}(?!\})|[^}])*(?:'
     r'steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+'
     r'|\binputs(?:\.|\[)|\btoJSON\s*\(\s*inputs\s*\)'
+    r'|\benv(?:\.|\[)|\btoJSON\s*\(\s*env\s*\)'
     r'|\bgithub\.event\b'
     r'|\bgithub\.head_ref\b'
     r'|\bgithub\.base_ref\b'
@@ -154,6 +157,7 @@ WORKFLOWS_DIR = ROOT / '.github' / 'workflows'
 UNTRUSTED_CONTEXT_PATTERNS = (
     r'\\b(?:steps|needs)\\.(?:\\}(?!\\})|[^}])+\\.outputs\\b',
     r'\\binputs(?:\\.|\\[)|\\btoJSON\\s*\\(\\s*inputs\\s*\\)',
+    r'\\benv(?:\\.|\\[)|\\btoJSON\\s*\\(\\s*env\\s*\\)',
     r'\\bgithub\\.event\\b',
     r'\\bgithub\\.head_ref\\b',
     r'\\bgithub\\.base_ref\\b',
@@ -555,6 +559,28 @@ jobs:
                     violations = detector(workflow, f'inputs-{label}.yml')
                     self.assertEqual(1, len(violations))
                     self.assertIn('inputs.x', violations[0])
+
+    def test_detects_env_context(self) -> None:
+        for label, expr in (
+            ('with_spaces', '${{ env.PLUGIN_FOLDER }}'),
+            ('without_spaces', '${{env.PLUGIN_FOLDER}}'),
+            ('bracket_indexed', "${{ env['PLUGIN_FOLDER'] }}"),
+        ):
+            workflow = f"""
+name: Env Context
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bad env interpolation
+        run: echo "{expr}"
+"""
+            for mode, detector in self._detectors():
+                with self.subTest(case=label, mode=mode):
+                    violations = detector(workflow, f'env-{label}.yml')
+                    self.assertEqual(1, len(violations))
+                    self.assertIn('PLUGIN_FOLDER', violations[0])
 
     def test_detects_github_event_context(self) -> None:
         for label, expr in (
@@ -1115,6 +1141,23 @@ def _find_heredoc_output_interpolations(run_script: str) -> list[str]:
     return sorted(set(found))
 
 
+def _collect_static_env_names(mapping_node: yaml.MappingNode) -> set[str]:
+    """Return exact (case-sensitive) keys statically defined in a node's env: mapping."""
+    env_pair = _get_mapping_pair(mapping_node, 'env')
+    if not env_pair or not isinstance(env_pair[1], yaml.MappingNode):
+        return set()
+    return {
+        k.value
+        for k, _ in env_pair[1].value
+        if isinstance(k, yaml.ScalarNode)
+    }
+
+
+def _env_var_defined_in_scope(var_name: str, defined_env_names: set[str]) -> bool:
+    """Case-sensitive membership check: ${{ env.X }} -> "${X}" is only safe when X is statically defined with exact case."""
+    return var_name in defined_env_names
+
+
 def analyze_and_transform_workflow_text(
     text: str, workflow_name: str = '<memory>'
 ) -> tuple[str, list[dict[str, Any]]]:
@@ -1137,6 +1180,7 @@ def analyze_and_transform_workflow_text(
         return text, warnings
 
     workflow_default_shell = _get_defaults_run_shell(root)
+    workflow_env_names = _collect_static_env_names(root)
     lines = text.splitlines(keepends=True)
     insertions: list[tuple[int, list[str]]] = []
 
@@ -1145,6 +1189,7 @@ def analyze_and_transform_workflow_text(
         if not isinstance(job_node, yaml.MappingNode):
             continue
         job_default_shell = _get_defaults_run_shell(job_node) or workflow_default_shell
+        job_env_names = workflow_env_names | _collect_static_env_names(job_node)
         steps_pair = _get_mapping_pair(job_node, 'steps')
         if not steps_pair or not isinstance(steps_pair[1], yaml.SequenceNode):
             continue
@@ -1272,10 +1317,29 @@ def analyze_and_transform_workflow_text(
                             if norm is not None:
                                 existing_by_expr[norm] = ek.value
 
+            step_defined_env_names = job_env_names | used_env_names
             expr_to_var: dict[str, str] = {}
             new_env_entries: list[tuple[str, str]] = []
             reserved_collision = False
             for expr_body in exprs_in_order:
+                if expr_body.startswith('env.'):
+                    env_var = expr_body[len('env.') :]
+                    if not _env_var_defined_in_scope(env_var, step_defined_env_names):
+                        warnings.append(
+                            {
+                                'kind': 'undefined_or_case_mismatched_env_var',
+                                'workflow': workflow_name,
+                                'job': job_id,
+                                'step': step_label,
+                                'env_name': env_var,
+                                'expressions': [f'${{{{ {expr_body} }}}}'],
+                            }
+                        )
+                        reserved_collision = True
+                        break
+                    # Statically defined with exact case; reference directly as "${VAR}" without duplicating env:.
+                    expr_to_var[expr_body] = env_var
+                    continue
                 if expr_body in existing_by_expr:
                     expr_to_var[expr_body] = existing_by_expr[expr_body]
                     continue
@@ -1460,6 +1524,10 @@ def wire_contract_test_in_tests_yml(text: str) -> str:
     prop_indent = step_indent + '  '
 
     _, insert_line = _node_line_span(last_step)
+    while insert_line > 0 and lines[insert_line - 1].strip() == '':
+        insert_line -= 1
+    if insert_line > 0 and not lines[insert_line - 1].endswith('\n'):
+        lines[insert_line - 1] += '\n'
     new_step = [
         '\n',
         f'{step_indent}- name: Test workflow steps.outputs env contract\n',
