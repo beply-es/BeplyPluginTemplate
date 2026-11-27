@@ -423,6 +423,252 @@ jobs:
             self.assertEqual(before, after)
             self.assertFalse((repo_dir / gen.CONTRACT_TEST_REL_PATH).exists())
 
+    def test_contract_test_fallback_without_pyyaml_reports_with_script_label(self) -> None:
+        namespace: dict[str, object] = {
+            '__file__': str(SCRIPT_DIR / 'test_workflow_no_steps_outputs_in_run.py'),
+            '__name__': 'test_workflow_no_steps_outputs_in_run',
+        }
+        exec(compile(gen.CONTRACT_TEST_SOURCE, 'test_workflow_no_steps_outputs_in_run.py', 'exec'), namespace)
+        find_fallback = namespace['_find_fallback']
+        assert callable(find_fallback)
+
+        block_script_wf = """name: Unsafe Script
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bad github-script
+        uses: actions/github-script@v7
+        with:
+          script: |
+            console.log("${{ steps.ini.outputs.name }}")
+"""
+        block_violations = find_fallback(block_script_wf, 'unsafe-script.yml')
+        self.assertEqual(1, len(block_violations))
+        self.assertIn('(with.script)', block_violations[0])
+        self.assertIn('steps.ini.outputs.name', block_violations[0])
+
+        inline_script_wf = """name: Unsafe Inline Script
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bad inline github-script
+        uses: actions/github-script@v7
+        with:
+          script: console.log("${{ steps.ini.outputs.version }}")
+"""
+        inline_violations = find_fallback(inline_script_wf, 'unsafe-inline-script.yml')
+        self.assertEqual(1, len(inline_violations))
+        self.assertIn('(with.script)', inline_violations[0])
+        self.assertIn('steps.ini.outputs.version', inline_violations[0])
+
+        # Also verify the generated unittest passes when PyYAML is unavailable (yaml = None).
+        namespace['yaml'] = None
+        test_cls = namespace['WorkflowNoStepsOutputsInRunTest']
+        case = test_cls('test_detects_unsafe_interpolation_in_with_script')
+        result = unittest.TestResult()
+        case.run(result)
+        self.assertTrue(
+            result.wasSuccessful(),
+            f'Expected test_detects_unsafe_interpolation_in_with_script to pass without PyYAML: '
+            f'failures={result.failures}, errors={result.errors}',
+        )
+
+    def test_contract_test_full_suite_runs_with_yaml_none_and_covers_fallback_and_needs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = _copy_fixture('BeplyA3', Path(tmp))
+            gen.process_repository(repo_dir, apply=True, repo_name='BeplyA3')
+            test_file = repo_dir / gen.CONTRACT_TEST_REL_PATH
+
+            # Run the ENTIRE generated contract test suite with yaml forced to None.
+            namespace: dict[str, object] = {
+                '__file__': str(test_file),
+                '__name__': 'test_workflow_no_steps_outputs_in_run',
+            }
+            exec(compile(gen.CONTRACT_TEST_SOURCE, str(test_file), 'exec'), namespace)
+            namespace['yaml'] = None
+            suite = unittest.TestLoader().loadTestsFromTestCase(
+                namespace['WorkflowNoStepsOutputsInRunTest']
+            )
+            result = unittest.TestResult()
+            suite.run(result)
+            self.assertTrue(
+                result.wasSuccessful(),
+                f'Full generated suite failed with yaml=None: '
+                f'failures={result.failures}, errors={result.errors}',
+            )
+            self.assertGreaterEqual(result.testsRun, 8)
+
+            # Verify documented known limits (C-d) are present in CONTRACT_TEST_SOURCE.
+            for expected_doc in (
+                '.github/workflows',
+                'flow mappings',
+                'anclas YAML',
+                'format(',
+                "steps['a'].outputs",
+                'toJSON(steps)',
+            ):
+                self.assertIn(expected_doc, gen.CONTRACT_TEST_SOURCE)
+
+    def test_contract_test_fallback_kills_all_five_mutants(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = _copy_fixture('BeplyA3', Path(tmp))
+            gen.process_repository(repo_dir, apply=True, repo_name='BeplyA3')
+            test_file = repo_dir / gen.CONTRACT_TEST_REL_PATH
+
+            mutants: list[tuple[str, str, str]] = [
+                (
+                    'M1_indent_lt_instead_of_le',
+                    'if nxt_indent <= key_indent:',
+                    'if nxt_indent < key_indent:',
+                ),
+                (
+                    'M2_only_first_block_line',
+                    "matches = STEPS_OUTPUTS_RE.findall('\\n'.join(block_lines))",
+                    "matches = STEPS_OUTPUTS_RE.findall('\\n'.join(block_lines[:1]))",
+                ),
+                (
+                    'M3_drop_dash_prefix_from_regex',
+                    r"m = re.match(r'^(\s*(?:-\s+)?)(run|script)\s*:(.*)$', line)",
+                    r"m = re.match(r'^(\s*)(run|script)\s*:(.*)$', line)",
+                ),
+                (
+                    'M4_break_on_blank_line',
+                    "if nxt.strip() == '':\n                block_lines.append(nxt)\n                j += 1\n                continue",
+                    "if nxt.strip() == '':\n                break",
+                ),
+                (
+                    'M5_emit_script_instead_of_with_script',
+                    "key_label = 'with.script' if key_name == 'script' else key_name",
+                    'key_label = key_name',
+                ),
+            ]
+
+            for mutant_name, original_snippet, mutated_snippet in mutants:
+                with self.subTest(mutant=mutant_name):
+                    self.assertIn(
+                        original_snippet,
+                        gen.CONTRACT_TEST_SOURCE,
+                        f'Original snippet not found for {mutant_name}',
+                    )
+                    mutated_src = gen.CONTRACT_TEST_SOURCE.replace(
+                        original_snippet, mutated_snippet, 1
+                    )
+                    namespace: dict[str, object] = {
+                        '__file__': str(test_file),
+                        '__name__': f'mutated_{mutant_name}',
+                    }
+                    exec(compile(mutated_src, f'{mutant_name}.py', 'exec'), namespace)
+                    namespace['yaml'] = None
+                    suite = unittest.TestLoader().loadTestsFromTestCase(
+                        namespace['WorkflowNoStepsOutputsInRunTest']
+                    )
+                    result = unittest.TestResult()
+                    suite.run(result)
+                    self.assertFalse(
+                        result.wasSuccessful(),
+                        f'Mutant {mutant_name} survived the fallback test suite!',
+                    )
+
+    def test_c_c_quotes_phpunit_config_without_quoting_targets(self) -> None:
+        workflow = r"""name: Unit
+on: push
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run phpunit
+        run: |
+          php vendor/bin/phpunit \
+            -c ${{ steps.unit-targets.outputs.config }} \
+            ${{ steps.unit-targets.outputs.targets }}
+"""
+        transformed = gen.transform_workflow_text(workflow)
+        data = yaml.safe_load(transformed)
+        step = data['jobs']['unit']['steps'][0]
+        run_cmd = step['run']
+
+        self.assertEqual('${{ steps.unit-targets.outputs.config }}', step['env']['PHPUNIT_CONFIG'])
+        self.assertEqual('${{ steps.unit-targets.outputs.targets }}', step['env']['PHPUNIT_TARGETS'])
+        self.assertIn('-c "${PHPUNIT_CONFIG}"', run_cmd)
+        self.assertNotIn('-c ${PHPUNIT_CONFIG}', run_cmd)
+        self.assertIn('${PHPUNIT_TARGETS}', run_cmd)
+        self.assertNotIn('"${PHPUNIT_TARGETS}"', run_cmd)
+
+        # Verify in bash: PHPUNIT_CONFIG with spaces stays 1 arg, PHPUNIT_TARGETS splits into 2 args.
+        probe_script = (
+            'args=()\n'
+            'for a in -c "${PHPUNIT_CONFIG}" ${PHPUNIT_TARGETS}; do args+=("$a"); done\n'
+            'printf "%s|" "${#args[@]}" "${args[@]}"\n'
+        )
+        probe = subprocess.run(
+            ['bash', '-euo', 'pipefail', '-c', probe_script],
+            env={'PHPUNIT_CONFIG': 'my dir/phpunit.xml', 'PHPUNIT_TARGETS': 'TestA.php TestB.php'},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual('4|-c|my dir/phpunit.xml|TestA.php|TestB.php|', probe.stdout)
+
+        # Adversarial proof: unquoted PHPUNIT_CONFIG splits spaces (5 args); quoted PHPUNIT_TARGETS collapses targets (3 args).
+        for bad_args, expected_not in (
+            ('-c ${PHPUNIT_CONFIG} ${PHPUNIT_TARGETS}', '4|-c|my dir/phpunit.xml|TestA.php|TestB.php|'),
+            ('-c "${PHPUNIT_CONFIG}" "${PHPUNIT_TARGETS}"', '4|-c|my dir/phpunit.xml|TestA.php|TestB.php|'),
+        ):
+            bad_probe = subprocess.run(
+                [
+                    'bash',
+                    '-euo',
+                    'pipefail',
+                    '-c',
+                    f'args=(); for a in {bad_args}; do args+=("$a"); done; printf "%s|" "${{#args[@]}}" "${{args[@]}}"',
+                ],
+                env={'PHPUNIT_CONFIG': 'my dir/phpunit.xml', 'PHPUNIT_TARGETS': 'TestA.php TestB.php'},
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertNotEqual(expected_not, bad_probe.stdout)
+
+    def test_wire_contract_test_prefers_php84_compatibility_over_unit(self) -> None:
+        tests_yml = """name: Tests
+on: push
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run phpunit
+        run: vendor/bin/phpunit
+  php84_compatibility:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run PHP 8.4 scan
+        run: php scripts/ci/php84-compat-scan.php "$PWD"
+"""
+        wired = gen.wire_contract_test_in_tests_yml(tests_yml)
+        parsed = yaml.safe_load(wired)
+
+        unit_steps = parsed['jobs']['unit']['steps']
+        php84_steps = parsed['jobs']['php84_compatibility']['steps']
+
+        self.assertFalse(
+            any('test_workflow_no_steps_outputs_in_run.py' in str(s.get('run', '')) for s in unit_steps),
+            'Contract test should not be wired into unit when php84_compatibility exists',
+        )
+        self.assertTrue(
+            any('test_workflow_no_steps_outputs_in_run.py' in str(s.get('run', '')) for s in php84_steps),
+            'Contract test must be wired into php84_compatibility',
+        )
+        # Idempotency check
+        self.assertEqual(wired, gen.wire_contract_test_in_tests_yml(wired))
+
 
 if __name__ == '__main__':
     unittest.main()
