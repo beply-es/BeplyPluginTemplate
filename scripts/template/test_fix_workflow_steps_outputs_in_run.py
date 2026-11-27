@@ -792,6 +792,330 @@ jobs:
                 self.assertNotEqual(0, cli.returncode, f'CLI must exit non-zero for {case_name}')
                 self.assertIn(expected_kind, cli.stdout)
 
+    def test_moves_inputs_github_event_and_refs_to_quoted_env_with_bash_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp) / 'PromoteRepo'
+            wf_dir = repo_dir / '.github' / 'workflows'
+            wf_dir.mkdir(parents=True)
+
+            promote_prod = """name: Promote Production
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        required: true
+        type: string
+      dev_campaign_run_id:
+        required: true
+        type: string
+      dev_campaign_run_url:
+        required: true
+        type: string
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Promote release
+        run: |
+          printf "tag=%s|run=%s|url=%s" ${{ inputs.release_tag }} "${{ inputs.dev_campaign_run_id }}" '${{ inputs.dev_campaign_run_url }}'
+"""
+            pr_notify = """name: PR Notify
+on:
+  pull_request:
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print metadata
+        run: |
+          printf "%s|%s|%s|%s|%s" "${{ github.event.pull_request.title }}" ${{ github.event.inputs.target }} ${{ github.head_ref }} ${{ github.base_ref }} ${{ github.ref_name }}
+"""
+            (wf_dir / 'promote-production.yml').write_text(promote_prod, encoding='utf-8')
+            (wf_dir / 'pr-notify.yml').write_text(pr_notify, encoding='utf-8')
+
+            # RED before generator
+            red = _run_contract_test(repo_dir)
+            self.assertNotEqual(0, red.returncode)
+
+            # CLI --dry-run must succeed (rc=0)
+            cli = subprocess.run(
+                [
+                    sys.executable,
+                    '-B',
+                    str(SCRIPT_DIR / 'fix_workflow_steps_outputs_in_run.py'),
+                    '--repo',
+                    str(repo_dir),
+                    '--dry-run',
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, cli.returncode, f'Expected rc=0 in dry-run:\n{cli.stdout}\n{cli.stderr}')
+
+            # Apply generator
+            res = gen.process_repository(repo_dir, apply=True, repo_name='PromoteRepo')
+            self.assertTrue(res.eligible_for_batch)
+            self.assertTrue(res.applied)
+            self.assertEqual([], res.warnings)
+
+            # Verify env: and quoted "${VAR}" in promote-production.yml
+            p_data = yaml.safe_load((wf_dir / 'promote-production.yml').read_text(encoding='utf-8'))
+            p_step = p_data['jobs']['promote']['steps'][0]
+            self.assertEqual('${{ inputs.release_tag }}', p_step['env']['INPUT_RELEASE_TAG'])
+            self.assertEqual('${{ inputs.dev_campaign_run_id }}', p_step['env']['INPUT_DEV_CAMPAIGN_RUN_ID'])
+            self.assertEqual('${{ inputs.dev_campaign_run_url }}', p_step['env']['INPUT_DEV_CAMPAIGN_RUN_URL'])
+            self.assertIn('"${INPUT_RELEASE_TAG}"', p_step['run'])
+            self.assertIn('"${INPUT_DEV_CAMPAIGN_RUN_ID}"', p_step['run'])
+            self.assertIn('"${INPUT_DEV_CAMPAIGN_RUN_URL}"', p_step['run'])
+
+            # Real bash proof: malicious inputs.release_tag='v1.0$(id)' is literal data, never executed.
+            probe_p = subprocess.run(
+                ['bash', '-euo', 'pipefail', '-c', p_step['run']],
+                env={
+                    'INPUT_RELEASE_TAG': 'v1.0$(id)',
+                    'INPUT_DEV_CAMPAIGN_RUN_ID': '12345',
+                    'INPUT_DEV_CAMPAIGN_RUN_URL': 'https://example.test/runs/12345',
+                },
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(
+                'tag=v1.0$(id)|run=12345|url=https://example.test/runs/12345',
+                probe_p.stdout,
+            )
+
+            # Verify env: and quoted "${VAR}" in pr-notify.yml
+            n_data = yaml.safe_load((wf_dir / 'pr-notify.yml').read_text(encoding='utf-8'))
+            n_step = n_data['jobs']['notify']['steps'][0]
+            self.assertEqual(
+                '${{ github.event.pull_request.title }}',
+                n_step['env']['GITHUB_EVENT_PULL_REQUEST_TITLE'],
+            )
+            self.assertEqual(
+                '${{ github.event.inputs.target }}',
+                n_step['env']['GITHUB_EVENT_INPUTS_TARGET'],
+            )
+            self.assertEqual('${{ github.head_ref }}', n_step['env']['GITHUB_HEAD_REF'])
+            self.assertEqual('${{ github.base_ref }}', n_step['env']['GITHUB_BASE_REF'])
+            self.assertEqual('${{ github.ref_name }}', n_step['env']['GITHUB_REF_NAME'])
+            self.assertIn('"${GITHUB_EVENT_PULL_REQUEST_TITLE}"', n_step['run'])
+            self.assertIn('"${GITHUB_EVENT_INPUTS_TARGET}"', n_step['run'])
+            self.assertIn('"${GITHUB_HEAD_REF}"', n_step['run'])
+            self.assertIn('"${GITHUB_BASE_REF}"', n_step['run'])
+            self.assertIn('"${GITHUB_REF_NAME}"', n_step['run'])
+
+            probe_n = subprocess.run(
+                ['bash', '-euo', 'pipefail', '-c', n_step['run']],
+                env={
+                    'GITHUB_EVENT_PULL_REQUEST_TITLE': 'feat: $(id)',
+                    'GITHUB_EVENT_INPUTS_TARGET': 'prod$(uname)',
+                    'GITHUB_HEAD_REF': 'feat/x',
+                    'GITHUB_BASE_REF': 'main',
+                    'GITHUB_REF_NAME': 'v1.0.0',
+                },
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual('feat: $(id)|prod$(uname)|feat/x|main|v1.0.0', probe_n.stdout)
+
+            # Idempotency: 2nd pass yields 0 diff
+            second = gen.process_repository(repo_dir, apply=True, repo_name='PromoteRepo')
+            self.assertEqual([], second.changed_files)
+            self.assertEqual(0, second.diff_bytes)
+
+            # Injected contract test passes 100% GREEN in BOTH PyYAML and yaml=None modes
+            green = _run_contract_test(repo_dir)
+            self.assertEqual(0, green.returncode, f'Contract test failed:\n{green.stdout}\n{green.stderr}')
+            test_file = repo_dir / gen.CONTRACT_TEST_REL_PATH
+            for force_none in (False, True):
+                ns: dict[str, object] = {
+                    '__file__': str(test_file),
+                    '__name__': f'promote_contract_none_{force_none}',
+                }
+                exec(compile(gen.CONTRACT_TEST_SOURCE, str(test_file), 'exec'), ns)
+                if force_none:
+                    ns['yaml'] = None
+                suite = unittest.TestLoader().loadTestsFromTestCase(
+                    ns['WorkflowNoStepsOutputsInRunTest']
+                )
+                suite_res = unittest.TestResult()
+                suite.run(suite_res)
+                self.assertTrue(
+                    suite_res.wasSuccessful(),
+                    f'Contract suite failed (yaml_none={force_none}): '
+                    f'failures={suite_res.failures}, errors={suite_res.errors}',
+                )
+
+    def test_fail_closed_on_unrewritable_inputs_and_github_event_forms(self) -> None:
+        cases = (
+            (
+                'heredoc_inputs',
+                'unsupported_heredoc_interpolation',
+                """name: Heredoc Inputs
+on: workflow_dispatch
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write tag
+        run: |
+          cat <<EOF > tag.txt
+          ${{ inputs.release_tag }}
+          EOF
+""",
+            ),
+            (
+                'shell_python_inputs',
+                'unsupported_non_posix_shell',
+                """name: Python Inputs
+on: workflow_dispatch
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print tag
+        shell: python
+        run: print("${{ inputs.release_tag }}")
+""",
+            ),
+            (
+                'shell_pwsh_event',
+                'unsupported_non_posix_shell',
+                """name: Pwsh Event
+on: pull_request
+jobs:
+  notify:
+    runs-on: windows-latest
+    steps:
+      - name: Print title
+        shell: pwsh
+        run: Write-Host "${{ github.event.pull_request.title }}"
+""",
+            ),
+            (
+                'tojson_github_event',
+                'unsupported_compound_expression',
+                """name: ToJSON Event
+on: pull_request
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dump event
+        run: echo "${{ toJSON(github.event) }}"
+""",
+            ),
+            (
+                'format_github_event',
+                'unsupported_compound_expression',
+                """name: Format Event
+on: pull_request
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Format title
+        run: echo "${{ format('{0}', github.event.pull_request.title) }}"
+""",
+            ),
+            (
+                'with_script_inputs',
+                'unsupported_with_script',
+                """name: Script Inputs
+on: workflow_dispatch
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Github script
+        uses: actions/github-script@v7
+        with:
+          script: |
+            console.log("${{ inputs.release_tag }}")
+""",
+            ),
+        )
+        for case_name, expected_kind, original in cases:
+            with self.subTest(case=case_name), tempfile.TemporaryDirectory() as tmp:
+                repo_dir = Path(tmp) / f'FailClosed_{case_name}'
+                wf_dir = repo_dir / '.github' / 'workflows'
+                wf_dir.mkdir(parents=True)
+                wf_path = wf_dir / 'ci.yml'
+                wf_path.write_text(original, encoding='utf-8')
+
+                res = gen.process_repository(repo_dir, apply=True, repo_name=repo_dir.name)
+                self.assertFalse(res.eligible_for_batch, f'{case_name} must fail closed')
+                self.assertFalse(res.applied)
+                self.assertEqual([], res.changed_files)
+                self.assertEqual(original, wf_path.read_text(encoding='utf-8'))
+                self.assertTrue(
+                    any(w['kind'] == expected_kind for w in res.warnings),
+                    f'Expected {expected_kind} for {case_name}, got {res.warnings}',
+                )
+
+                cli = subprocess.run(
+                    [
+                        sys.executable,
+                        '-B',
+                        str(SCRIPT_DIR / 'fix_workflow_steps_outputs_in_run.py'),
+                        '--repo',
+                        str(repo_dir),
+                        '--dry-run',
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(0, cli.returncode, f'CLI must exit non-zero for {case_name}')
+
+    def test_adversarial_mutants_not_moving_inputs_or_github_event_fail(self) -> None:
+        from unittest import mock
+
+        cases = (
+            (
+                'mutant_no_inputs',
+                r'\$\{\{\s*(steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+|github\.event\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*|github\.(?:head_ref|base_ref|ref_name))\s*\}\}',
+                """name: Promote
+on: workflow_dispatch
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Promote
+        run: echo "${{ inputs.release_tag }}"
+""",
+            ),
+            (
+                'mutant_no_github_event',
+                r'\$\{\{\s*(steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+|inputs\.[A-Za-z0-9_-]+|github\.(?:head_ref|base_ref|ref_name))\s*\}\}',
+                """name: Notify
+on: pull_request
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify
+        run: echo "${{ github.event.pull_request.title }}"
+""",
+            ),
+        )
+        import re as _re
+
+        for mutant_name, mutated_pattern, wf_text in cases:
+            with self.subTest(mutant=mutant_name), tempfile.TemporaryDirectory() as tmp:
+                repo_dir = Path(tmp) / mutant_name
+                wf_dir = repo_dir / '.github' / 'workflows'
+                wf_dir.mkdir(parents=True)
+                (wf_dir / 'ci.yml').write_text(wf_text, encoding='utf-8')
+
+                with mock.patch.object(gen, 'SIMPLE_UNTRUSTED_EXPR_RE', _re.compile(mutated_pattern)):
+                    res = gen.process_repository(repo_dir, apply=True, repo_name=mutant_name)
+                    # Mutant fails to rewrite -> generator fails closed and contract test stays RED
+                    self.assertFalse(res.eligible_for_batch)
+                    red = _run_contract_test(repo_dir)
+                    self.assertNotEqual(0, red.returncode)
+
     def test_wire_contract_test_prefers_php84_compatibility_over_unit(self) -> None:
         tests_yml = """name: Tests
 on: push

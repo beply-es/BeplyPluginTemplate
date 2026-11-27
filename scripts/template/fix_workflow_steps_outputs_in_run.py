@@ -44,13 +44,37 @@ class InvalidWorkflowYamlError(RuntimeError):
 STEPS_OUTPUT_EXPR_RE = re.compile(
     r'\$\{\{\s*steps\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)\s*\}\}'
 )
-ANY_STEPS_OUTPUT_EXPR_RE = re.compile(
-    r'\$\{\{[^}]*steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+[^}]*\}\}'
+SIMPLE_UNTRUSTED_EXPR_RE = re.compile(
+    r'\$\{\{\s*('
+    r'steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+'
+    r'|inputs\.[A-Za-z0-9_-]+'
+    r'|github\.event\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*'
+    r'|github\.(?:head_ref|base_ref|ref_name)'
+    r')\s*\}\}'
 )
-POST_TRANSFORM_RESIDUAL_RE = re.compile(
-    r'\$\{\{[^}]*\b(?:steps|needs)\.[^}]*\.outputs\b[^}]*\}\}',
+UNTRUSTED_EXPR_RE = re.compile(
+    r'\$\{\{(?:\}(?!\})|[^}])*(?:'
+    r'\b(?:steps|needs)\.(?:\}(?!\})|[^}])+\.outputs\b'
+    r'|\binputs(?:\.|\[)|\btoJSON\s*\(\s*inputs\s*\)'
+    r'|\bgithub\.event\b'
+    r'|\bgithub\.head_ref\b'
+    r'|\bgithub\.base_ref\b'
+    r'|\bgithub\.ref_name\b'
+    r')(?:\}(?!\})|[^}])*\}\}',
     re.DOTALL,
 )
+ANY_STEPS_OUTPUT_EXPR_RE = re.compile(
+    r'\$\{\{(?:\}(?!\})|[^}])*(?:'
+    r'steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+'
+    r'|\binputs(?:\.|\[)|\btoJSON\s*\(\s*inputs\s*\)'
+    r'|\bgithub\.event\b'
+    r'|\bgithub\.head_ref\b'
+    r'|\bgithub\.base_ref\b'
+    r'|\bgithub\.ref_name\b'
+    r')(?:\}(?!\})|[^}])*\}\}',
+    re.DOTALL,
+)
+POST_TRANSFORM_RESIDUAL_RE = UNTRUSTED_EXPR_RE
 
 CANONICAL_ENV_NAMES: dict[tuple[str, str], str] = {
     ('ini', 'name'): 'PLUGIN_NAME',
@@ -578,6 +602,22 @@ def _canonical_env_name(step_id: str, output_name: str) -> str:
     return f'STEP_{clean_step}_{clean_out}'
 
 
+def _canonical_env_name_for_expr(expr_body: str) -> str:
+    m_step = re.fullmatch(r'steps\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)', expr_body)
+    if m_step:
+        return _canonical_env_name(m_step.group(1), m_step.group(2))
+    if expr_body.startswith('inputs.'):
+        clean_in = re.sub(r'[^A-Za-z0-9]+', '_', expr_body[len('inputs.') :]).strip('_').upper()
+        return f'INPUT_{clean_in}'
+    if expr_body.startswith('github.event.'):
+        clean_ev = re.sub(r'[^A-Za-z0-9]+', '_', expr_body[len('github.event.') :]).strip('_').upper()
+        return f'GITHUB_EVENT_{clean_ev}'
+    if expr_body.startswith('github.'):
+        clean_gh = re.sub(r'[^A-Za-z0-9]+', '_', expr_body[len('github.') :]).strip('_').upper()
+        return f'GITHUB_{clean_gh}'
+    return re.sub(r'[^A-Za-z0-9]+', '_', expr_body).strip('_').upper()
+
+
 def _quote_context(line: str, match_start: int) -> str:
     """Return shell quote context at match_start: 'single', 'double', or 'none'.
 
@@ -632,8 +672,8 @@ def _is_directly_single_quoted(line: str, start: int, end: int) -> bool:
     return start > 0 and end < len(line) and line[start - 1] == "'" and line[end] == "'"
 
 
-def _replace_in_run_line(line: str, mapping: dict[tuple[str, str], str]) -> str:
-    """Replace all simple ${{ steps.X.outputs.Y }} in a run: line respecting original quotes.
+def _replace_in_run_line(line: str, mapping: dict[str, str]) -> str:
+    """Replace all simple untrusted expressions in a run: line respecting original quotes.
 
     - Unquoted -> "${VAR}" for single-value vars (e.g. -c "${PHPUNIT_CONFIG}"); *_TARGETS stay
       unquoted as ${VAR} intentionally for bash word-splitting (shell never executes $(...)).
@@ -643,8 +683,8 @@ def _replace_in_run_line(line: str, mapping: dict[tuple[str, str], str]) -> str:
     """
     out_parts: list[str] = []
     pos = 0
-    for m in STEPS_OUTPUT_EXPR_RE.finditer(line):
-        key = (m.group(1), m.group(2))
+    for m in SIMPLE_UNTRUSTED_EXPR_RE.finditer(line):
+        key = m.group(1)
         var_name = mapping[key]
         start, end = m.span()
         ctx = _quote_context(line, start)
@@ -701,11 +741,11 @@ def _get_mapping_pair(
     return None
 
 
-def _normalize_expr(expr: str) -> tuple[str, str] | None:
-    m = STEPS_OUTPUT_EXPR_RE.fullmatch(expr.strip())
+def _normalize_expr(expr: str) -> str | None:
+    m = SIMPLE_UNTRUSTED_EXPR_RE.fullmatch(expr.strip())
     if not m:
         return None
-    return (m.group(1), m.group(2))
+    return m.group(1)
 
 
 POSIX_SHELL_NAMES = frozenset({'bash', 'sh', 'dash', 'zsh'})
@@ -864,10 +904,10 @@ def analyze_and_transform_workflow_text(
                 )
                 continue
 
-            # C3: Fail-closed on compound expressions inside run:
+            # C3: Fail-closed on compound or non-rewritable untrusted expressions inside run:
             all_any_matches = ANY_STEPS_OUTPUT_EXPR_RE.findall(run_v.value)
             unsupported_exprs = [
-                expr for expr in all_any_matches if not STEPS_OUTPUT_EXPR_RE.fullmatch(expr)
+                expr for expr in all_any_matches if not SIMPLE_UNTRUSTED_EXPR_RE.fullmatch(expr)
             ]
             if unsupported_exprs:
                 warnings.append(
@@ -881,19 +921,19 @@ def analyze_and_transform_workflow_text(
                 )
                 continue
 
-            pairs_in_order: list[tuple[str, str]] = []
-            seen: set[tuple[str, str]] = set()
-            for m in STEPS_OUTPUT_EXPR_RE.finditer(run_v.value):
-                pair = (m.group(1), m.group(2))
-                if pair not in seen:
-                    seen.add(pair)
-                    pairs_in_order.append(pair)
-            if not pairs_in_order:
+            exprs_in_order: list[str] = []
+            seen: set[str] = set()
+            for m in SIMPLE_UNTRUSTED_EXPR_RE.finditer(run_v.value):
+                expr_body = m.group(1)
+                if expr_body not in seen:
+                    seen.add(expr_body)
+                    exprs_in_order.append(expr_body)
+            if not exprs_in_order:
                 continue
 
             # Inspect existing env: mapping on this step
             env_pair = _get_mapping_pair(step_node, 'env')
-            existing_by_expr: dict[tuple[str, str], str] = {}
+            existing_by_expr: dict[str, str] = {}
             used_env_names: set[str] = set()
             if env_pair and isinstance(env_pair[1], yaml.MappingNode):
                 for ek, ev in env_pair[1].value:
@@ -904,27 +944,27 @@ def analyze_and_transform_workflow_text(
                             if norm is not None:
                                 existing_by_expr[norm] = ek.value
 
-            expr_to_var: dict[tuple[str, str], str] = {}
+            expr_to_var: dict[str, str] = {}
             new_env_entries: list[tuple[str, str]] = []
-            for pair in pairs_in_order:
-                if pair in existing_by_expr:
-                    expr_to_var[pair] = existing_by_expr[pair]
+            for expr_body in exprs_in_order:
+                if expr_body in existing_by_expr:
+                    expr_to_var[expr_body] = existing_by_expr[expr_body]
                     continue
-                base_name = _canonical_env_name(pair[0], pair[1])
+                base_name = _canonical_env_name_for_expr(expr_body)
                 candidate = base_name
                 suffix = 2
                 while candidate in used_env_names:
                     candidate = f'{base_name}_{suffix}'
                     suffix += 1
                 used_env_names.add(candidate)
-                expr_to_var[pair] = candidate
-                new_env_entries.append((candidate, f'${{{{ steps.{pair[0]}.outputs.{pair[1]} }}}}'))
+                expr_to_var[expr_body] = candidate
+                new_env_entries.append((candidate, f'${{{{ {expr_body} }}}}'))
 
             # Rewrite ONLY the lines belonging to run_v
             run_start, run_end = _node_line_span(run_v)
             for idx in range(run_start, min(run_end, len(lines))):
                 raw = lines[idx]
-                if not STEPS_OUTPUT_EXPR_RE.search(raw):
+                if not SIMPLE_UNTRUSTED_EXPR_RE.search(raw):
                     continue
                 newline = '\n' if raw.endswith('\n') else ''
                 body = raw[:-1] if newline else raw
