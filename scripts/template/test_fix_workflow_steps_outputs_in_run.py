@@ -1486,6 +1486,141 @@ jobs:
             self.assertFalse(dirty.eligible_for_batch)
             self.assertTrue(any(w['kind'] == 'unclean_pyc_artifacts' for w in dirty.warnings))
 
+    def test_rewrites_env_context_in_run_without_duplicating_env_and_kills_mutant(self) -> None:
+        from unittest import mock
+        import re as _re
+
+        wf_text = """name: Tests
+on: push
+env:
+  PLUGIN_FOLDER: ${{ github.event.repository.name }}
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare ARC PHP prerequisites
+        run: |
+          echo ${{ env.PLUGIN_FOLDER }}
+          test -d "Plugins/${{ env.PLUGIN_FOLDER }}"
+          printf "%s" '${{ env.PLUGIN_FOLDER }}'
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp) / 'EnvContextRepo'
+            wf_dir = repo_dir / '.github' / 'workflows'
+            wf_dir.mkdir(parents=True)
+            wf_path = wf_dir / 'tests.yml'
+            wf_path.write_text(wf_text, encoding='utf-8')
+
+            # RED before generator
+            red = _run_contract_test(repo_dir)
+            self.assertNotEqual(0, red.returncode)
+
+            res = gen.process_repository(repo_dir, apply=True, repo_name='EnvContextRepo')
+            self.assertTrue(res.eligible_for_batch)
+            self.assertTrue(res.applied)
+            self.assertEqual([], res.warnings)
+
+            parsed = yaml.safe_load(wf_path.read_text(encoding='utf-8'))
+            step = parsed['jobs']['lint']['steps'][0]
+            self.assertNotIn('env', step, 'Rewriting ${{ env.X }} must not duplicate step env:')
+            self.assertIn('echo "${PLUGIN_FOLDER}"', step['run'])
+            self.assertIn('test -d "Plugins/${PLUGIN_FOLDER}"', step['run'])
+            self.assertIn('printf "%s" "${PLUGIN_FOLDER}"', step['run'])
+            self.assertNotIn('env.PLUGIN_FOLDER', step['run'])
+
+            # Idempotency
+            second = gen.process_repository(repo_dir, apply=True, repo_name='EnvContextRepo')
+            self.assertEqual([], second.changed_files)
+            self.assertEqual(0, second.diff_bytes)
+
+            # Contract test passes in BOTH PyYAML and yaml=None modes
+            test_file = repo_dir / gen.CONTRACT_TEST_REL_PATH
+            for force_none in (False, True):
+                ns: dict[str, object] = {
+                    '__file__': str(test_file),
+                    '__name__': f'env_contract_none_{force_none}',
+                }
+                exec(compile(gen.CONTRACT_TEST_SOURCE, str(test_file), 'exec'), ns)
+                if force_none:
+                    ns['yaml'] = None
+                suite = unittest.TestLoader().loadTestsFromTestCase(
+                    ns['WorkflowNoStepsOutputsInRunTest']
+                )
+                r = unittest.TestResult()
+                suite.run(r)
+                self.assertTrue(r.wasSuccessful(), f'Failed (yaml_none={force_none}): {r.failures} {r.errors}')
+
+        # Fail-closed on env.X in heredoc, non-POSIX shell, and eval sink
+        for kind_name, expected_kind, bad_wf in (
+            (
+                'env_heredoc',
+                'unsupported_heredoc_interpolation',
+                'name: H\non: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          cat <<EOF\n          ${{ env.PLUGIN_FOLDER }}\n          EOF\n',
+            ),
+            (
+                'env_python',
+                'unsupported_non_posix_shell',
+                'name: P\non: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: python\n        run: print("${{ env.PLUGIN_FOLDER }}")\n',
+            ),
+            (
+                'env_eval',
+                'unsupported_shell_eval_sink',
+                'name: E\non: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: eval "echo ${{ env.PLUGIN_FOLDER }}"\n',
+            ),
+        ):
+            with self.subTest(fail_closed=kind_name):
+                _, w = gen.analyze_and_transform_workflow_text(bad_wf, f'{kind_name}.yml')
+                self.assertTrue(any(x['kind'] == expected_kind for x in w), f'{kind_name}: {w}')
+
+        # Adversarial mutant: removing env pattern from CONTRACT_TEST_SOURCE must fail in BOTH modes
+        env_pat_line = "    r'\\benv(?:\\.|\\[)|\\btoJSON\\s*\\(\\s*env\\s*\\)',\n"
+        self.assertIn(env_pat_line, gen.CONTRACT_TEST_SOURCE)
+        mut_src = gen.CONTRACT_TEST_SOURCE.replace(env_pat_line, '', 1)
+        for force_none in (False, True):
+            with self.subTest(mutant='M_env_context', yaml_none=force_none):
+                ns = {'__file__': 'scripts/ci/test_workflow_no_steps_outputs_in_run.py', '__name__': 'm_env'}
+                exec(compile(mut_src, 'm_env.py', 'exec'), ns)
+                if force_none:
+                    ns['yaml'] = None
+                case = ns['WorkflowNoStepsOutputsInRunTest']('test_detects_env_context')
+                r = unittest.TestResult()
+                case.run(r)
+                self.assertFalse(r.wasSuccessful(), f'M_env_context survived (yaml_none={force_none})')
+
+        # Adversarial mutant: generator not rewriting env.* fails closed
+        no_env_re = _re.compile(gen.SIMPLE_UNTRUSTED_EXPR_RE.pattern.replace(r'|env\.[A-Za-z_][A-Za-z0-9_]*', ''))
+        with mock.patch.object(gen, 'SIMPLE_UNTRUSTED_EXPR_RE', no_env_re):
+            _, mw = gen.analyze_and_transform_workflow_text(wf_text, 'tests.yml')
+            self.assertTrue(len(mw) > 0, 'Generator mutant ignoring env.* must fail closed')
+
+    def test_wire_contract_test_does_not_introduce_double_blank_line(self) -> None:
+        tests_yml = """name: Tests
+on: push
+jobs:
+  php84_compatibility:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run PHP 8.4 scan
+        run: php scripts/ci/php84-compat-scan.php "$PWD"
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+"""
+        wired = gen.wire_contract_test_in_tests_yml(tests_yml)
+        self.assertNotIn('\n\n\n', wired, f'Double blank line found in wired tests.yml:\n{wired!r}')
+        self.assertEqual(wired, gen.wire_contract_test_in_tests_yml(wired))
+
+        # Also verify on real BeplyA3 fixture tests.yml
+        a3_tests = (FIXTURES_DIR / 'BeplyA3' / '.github' / 'workflows' / 'tests.yml').read_text(encoding='utf-8')
+        self.assertNotIn('\n\n\n', a3_tests)
+        a3_wired = gen.wire_contract_test_in_tests_yml(gen.transform_workflow_text(a3_tests))
+        self.assertNotIn('\n\n\n', a3_wired)
+
     def test_wire_contract_test_prefers_php84_compatibility_over_unit(self) -> None:
         tests_yml = """name: Tests
 on: push

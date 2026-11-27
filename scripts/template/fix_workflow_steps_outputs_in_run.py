@@ -48,6 +48,7 @@ SIMPLE_UNTRUSTED_EXPR_RE = re.compile(
     r'\$\{\{\s*('
     r'steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+'
     r'|inputs\.[A-Za-z0-9_-]+'
+    r'|env\.[A-Za-z_][A-Za-z0-9_]*'
     r'|github\.event\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*'
     r'|github\.(?:head_ref|base_ref|ref_name)'
     r')\s*\}\}'
@@ -56,6 +57,7 @@ UNTRUSTED_EXPR_RE = re.compile(
     r'\$\{\{(?:\}(?!\})|[^}])*(?:'
     r'\b(?:steps|needs)\.(?:\}(?!\})|[^}])+\.outputs\b'
     r'|\binputs(?:\.|\[)|\btoJSON\s*\(\s*inputs\s*\)'
+    r'|\benv(?:\.|\[)|\btoJSON\s*\(\s*env\s*\)'
     r'|\bgithub\.event\b'
     r'|\bgithub\.head_ref\b'
     r'|\bgithub\.base_ref\b'
@@ -67,6 +69,7 @@ ANY_STEPS_OUTPUT_EXPR_RE = re.compile(
     r'\$\{\{(?:\}(?!\})|[^}])*(?:'
     r'steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+'
     r'|\binputs(?:\.|\[)|\btoJSON\s*\(\s*inputs\s*\)'
+    r'|\benv(?:\.|\[)|\btoJSON\s*\(\s*env\s*\)'
     r'|\bgithub\.event\b'
     r'|\bgithub\.head_ref\b'
     r'|\bgithub\.base_ref\b'
@@ -154,6 +157,7 @@ WORKFLOWS_DIR = ROOT / '.github' / 'workflows'
 UNTRUSTED_CONTEXT_PATTERNS = (
     r'\\b(?:steps|needs)\\.(?:\\}(?!\\})|[^}])+\\.outputs\\b',
     r'\\binputs(?:\\.|\\[)|\\btoJSON\\s*\\(\\s*inputs\\s*\\)',
+    r'\\benv(?:\\.|\\[)|\\btoJSON\\s*\\(\\s*env\\s*\\)',
     r'\\bgithub\\.event\\b',
     r'\\bgithub\\.head_ref\\b',
     r'\\bgithub\\.base_ref\\b',
@@ -555,6 +559,28 @@ jobs:
                     violations = detector(workflow, f'inputs-{label}.yml')
                     self.assertEqual(1, len(violations))
                     self.assertIn('inputs.x', violations[0])
+
+    def test_detects_env_context(self) -> None:
+        for label, expr in (
+            ('with_spaces', '${{ env.PLUGIN_FOLDER }}'),
+            ('without_spaces', '${{env.PLUGIN_FOLDER}}'),
+            ('bracket_indexed', "${{ env['PLUGIN_FOLDER'] }}"),
+        ):
+            workflow = f"""
+name: Env Context
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bad env interpolation
+        run: echo "{expr}"
+"""
+            for mode, detector in self._detectors():
+                with self.subTest(case=label, mode=mode):
+                    violations = detector(workflow, f'env-{label}.yml')
+                    self.assertEqual(1, len(violations))
+                    self.assertIn('PLUGIN_FOLDER', violations[0])
 
     def test_detects_github_event_context(self) -> None:
         for label, expr in (
@@ -1276,6 +1302,10 @@ def analyze_and_transform_workflow_text(
             new_env_entries: list[tuple[str, str]] = []
             reserved_collision = False
             for expr_body in exprs_in_order:
+                if expr_body.startswith('env.'):
+                    # Already an environment variable; reference directly as "${VAR}" without duplicating env:.
+                    expr_to_var[expr_body] = expr_body[len('env.') :]
+                    continue
                 if expr_body in existing_by_expr:
                     expr_to_var[expr_body] = existing_by_expr[expr_body]
                     continue
@@ -1460,6 +1490,10 @@ def wire_contract_test_in_tests_yml(text: str) -> str:
     prop_indent = step_indent + '  '
 
     _, insert_line = _node_line_span(last_step)
+    while insert_line > 0 and lines[insert_line - 1].strip() == '':
+        insert_line -= 1
+    if insert_line > 0 and not lines[insert_line - 1].endswith('\n'):
+        lines[insert_line - 1] += '\n'
     new_step = [
         '\n',
         f'{step_indent}- name: Test workflow steps.outputs env contract\n',
