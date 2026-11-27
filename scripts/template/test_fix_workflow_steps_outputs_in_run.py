@@ -890,17 +890,17 @@ jobs:
             n_step = n_data['jobs']['notify']['steps'][0]
             self.assertEqual(
                 '${{ github.event.pull_request.title }}',
-                n_step['env']['GITHUB_EVENT_PULL_REQUEST_TITLE'],
+                n_step['env']['GH_EVENT_PULL_REQUEST_TITLE'],
             )
             self.assertEqual(
                 '${{ github.event.inputs.target }}',
-                n_step['env']['GITHUB_EVENT_INPUTS_TARGET'],
+                n_step['env']['GH_EVENT_INPUTS_TARGET'],
             )
             self.assertEqual('${{ github.head_ref }}', n_step['env']['GITHUB_HEAD_REF'])
             self.assertEqual('${{ github.base_ref }}', n_step['env']['GITHUB_BASE_REF'])
             self.assertEqual('${{ github.ref_name }}', n_step['env']['GITHUB_REF_NAME'])
-            self.assertIn('"${GITHUB_EVENT_PULL_REQUEST_TITLE}"', n_step['run'])
-            self.assertIn('"${GITHUB_EVENT_INPUTS_TARGET}"', n_step['run'])
+            self.assertIn('"${GH_EVENT_PULL_REQUEST_TITLE}"', n_step['run'])
+            self.assertIn('"${GH_EVENT_INPUTS_TARGET}"', n_step['run'])
             self.assertIn('"${GITHUB_HEAD_REF}"', n_step['run'])
             self.assertIn('"${GITHUB_BASE_REF}"', n_step['run'])
             self.assertIn('"${GITHUB_REF_NAME}"', n_step['run'])
@@ -908,8 +908,8 @@ jobs:
             probe_n = subprocess.run(
                 ['bash', '-euo', 'pipefail', '-c', n_step['run']],
                 env={
-                    'GITHUB_EVENT_PULL_REQUEST_TITLE': 'feat: $(id)',
-                    'GITHUB_EVENT_INPUTS_TARGET': 'prod$(uname)',
+                    'GH_EVENT_PULL_REQUEST_TITLE': 'feat: $(id)',
+                    'GH_EVENT_INPUTS_TARGET': 'prod$(uname)',
                     'GITHUB_HEAD_REF': 'feat/x',
                     'GITHUB_BASE_REF': 'main',
                     'GITHUB_REF_NAME': 'v1.0.0',
@@ -1116,6 +1116,171 @@ jobs:
                     red = _run_contract_test(repo_dir)
                     self.assertNotEqual(0, red.returncode)
 
+    def test_c1_fail_closed_on_shell_eval_sinks_generator_and_contract(self) -> None:
+        sink_cases = (
+            ('eval', 'eval "echo ${{ inputs.x }}"', 'eval "echo ${INPUT_X}"'),
+            ('bash_c', 'bash -c "echo ${{ inputs.x }}"', 'bash -c "echo ${INPUT_X}"'),
+            ('sh_c', "sh -c 'echo ${{ inputs.x }}'", 'sh -lc "echo ${INPUT_X}"'),
+            ('zsh_c', 'zsh -c "echo ${{ inputs.x }}"', 'zsh -c "echo ${INPUT_X}"'),
+            ('dash_c', 'dash -ec "echo ${{ inputs.x }}"', 'dash -ec "echo ${INPUT_X}"'),
+            ('ssh', 'ssh deploy@host "echo ${{ inputs.x }}"', 'ssh deploy@host "echo ${INPUT_X}"'),
+            ('su_c', 'su -s /bin/sh www-data -c "echo ${{ inputs.x }}"', 'su -s /bin/sh www-data -c "echo ${INPUT_X}"'),
+            ('xargs_sh', 'printf "%s\\n" "${{ inputs.x }}" | xargs bash', 'printf "%s\\n" "${INPUT_X}" | xargs bash'),
+        )
+
+        for sink_name, raw_cmd, env_cmd in sink_cases:
+            with self.subTest(sink=sink_name), tempfile.TemporaryDirectory() as tmp:
+                repo_dir = Path(tmp) / f'Sink_{sink_name}'
+                wf_dir = repo_dir / '.github' / 'workflows'
+                wf_dir.mkdir(parents=True)
+
+                # 1. Generator must fail closed with unsupported_shell_eval_sink
+                raw_wf = f"""name: Sink {sink_name}
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sink step
+        run: |
+          {raw_cmd}
+"""
+                wf_path = wf_dir / 'sink.yml'
+                wf_path.write_text(raw_wf, encoding='utf-8')
+                res = gen.process_repository(repo_dir, apply=True, repo_name=repo_dir.name)
+                self.assertFalse(res.eligible_for_batch, f'Generator must fail closed on {sink_name}')
+                self.assertFalse(res.applied)
+                self.assertEqual(raw_wf, wf_path.read_text(encoding='utf-8'))
+                self.assertTrue(
+                    any(w['kind'] == 'unsupported_shell_eval_sink' for w in res.warnings),
+                    f'Expected unsupported_shell_eval_sink for {sink_name}, got {res.warnings}',
+                )
+
+                # 2. Contract test must ALSO reject env-mapped untrusted var passed to sink in BOTH modes
+                env_wf = f"""name: Env Sink {sink_name}
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Env sink step
+        env:
+          INPUT_X: ${{{{ inputs.x }}}}
+        run: |
+          {env_cmd}
+"""
+                ns: dict[str, object] = {
+                    '__file__': str(repo_dir / gen.CONTRACT_TEST_REL_PATH),
+                    '__name__': f'contract_sink_{sink_name}',
+                }
+                exec(compile(gen.CONTRACT_TEST_SOURCE, 'contract.py', 'exec'), ns)
+                v_yaml = ns['_find_with_pyyaml'](env_wf, f'{sink_name}.yml')
+                v_fb = ns['_find_fallback'](env_wf, f'{sink_name}.yml')
+                self.assertEqual(1, len(v_yaml), f'PyYAML contract missed {sink_name}: {v_yaml}')
+                self.assertEqual(1, len(v_fb), f'Fallback contract missed {sink_name}: {v_fb}')
+                self.assertIn('shell-eval-sink', v_yaml[0])
+                self.assertIn('shell-eval-sink', v_fb[0])
+
+        # Adversarial mutant check: removing any of the 5 sink patterns from CONTRACT_TEST_SOURCE
+        # must cause test_rejects_untrusted_env_in_shell_eval_sinks to FAIL in BOTH modes.
+        sink_mutants = (
+            ('M_sink_eval', "    r'(?:^|[;|&(`]|\\s)eval(?:\\s|$)',\n"),
+            ('M_sink_shell_c', "    r'(?:^|[;|&(`]|\\s)(?:/[^\\s;|&]*?/)?(?:bash|sh|zsh|dash)\\b[^#\\n;|&]*\\s-[a-zA-Z]*c\\b',\n"),
+            ('M_sink_ssh', "    r'(?:^|[;|&(`]|\\s)(?:/[^\\s;|&]*?/)?ssh(?:\\s|$)',\n"),
+            ('M_sink_su_c', "    r'(?:^|[;|&(`]|\\s)(?:/[^\\s;|&]*?/)?su\\b[^#\\n;|&]*\\s-[a-zA-Z]*c\\b',\n"),
+            ('M_sink_xargs_sh', "    r'(?:^|[;|&(`]|\\s)(?:/[^\\s;|&]*?/)?xargs\\b[^#\\n;|&]*\\s(?:/[^\\s;|&]*?/)?(?:bash|sh|zsh|dash)\\b',\n"),
+        )
+        for m_name, pat_line in sink_mutants:
+            self.assertIn(pat_line, gen.CONTRACT_TEST_SOURCE, f'{m_name} pattern not found')
+            mut_src = gen.CONTRACT_TEST_SOURCE.replace(pat_line, '', 1)
+            for force_none in (False, True):
+                with self.subTest(mutant=m_name, yaml_none=force_none):
+                    ns = {'__file__': 'scripts/ci/test_workflow_no_steps_outputs_in_run.py', '__name__': m_name}
+                    exec(compile(mut_src, f'{m_name}.py', 'exec'), ns)
+                    if force_none:
+                        ns['yaml'] = None
+                    case = ns['WorkflowNoStepsOutputsInRunTest']('test_rejects_untrusted_env_in_shell_eval_sinks')
+                    r = unittest.TestResult()
+                    case.run(r)
+                    self.assertFalse(r.wasSuccessful(), f'Sink mutant {m_name} survived (yaml_none={force_none})!')
+
+    def test_c2_gh_event_prefix_and_reserved_runner_env_guard(self) -> None:
+        from unittest import mock
+
+        safe_wf = """name: Event Names
+on: push
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print event fields
+        run: |
+          printf "%s|%s|%s" ${{ github.event.name }} ${{ github.event.path }} ${{ github.head_ref }}
+"""
+        transformed, warnings = gen.analyze_and_transform_workflow_text(safe_wf, 'meta.yml')
+        self.assertEqual([], warnings)
+        data = yaml.safe_load(transformed)
+        step = data['jobs']['meta']['steps'][0]
+        self.assertEqual('${{ github.event.name }}', step['env']['GH_EVENT_NAME'])
+        self.assertEqual('${{ github.event.path }}', step['env']['GH_EVENT_PATH'])
+        self.assertEqual('${{ github.head_ref }}', step['env']['GITHUB_HEAD_REF'])
+        self.assertNotIn('GITHUB_EVENT_NAME', step['env'])
+        self.assertNotIn('GITHUB_EVENT_PATH', step['env'])
+
+        # Reserved runner env collisions MUST fail closed
+        reserved_cases = (
+            ('runner_prefix', 'steps.runner_attestation.outputs.os', 'RUNNER_ATTESTATION_OS'),
+            ('actions_prefix', 'steps.actions_attestation.outputs.id', 'ACTIONS_ATTESTATION_ID'),
+            ('github_prefix', 'steps.github_attestation.outputs.sha', 'GITHUB_ATTESTATION_SHA'),
+        )
+        for case_name, expr, expected_var in reserved_cases:
+            with self.subTest(case=case_name), tempfile.TemporaryDirectory() as tmp:
+                repo_dir = Path(tmp) / f'Reserved_{case_name}'
+                wf_dir = repo_dir / '.github' / 'workflows'
+                wf_dir.mkdir(parents=True)
+                wf_text = f"""name: Reserved {case_name}
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collide
+        run: echo "${{{{ {expr} }}}}"
+"""
+                wf_path = wf_dir / 'ci.yml'
+                wf_path.write_text(wf_text, encoding='utf-8')
+                res = gen.process_repository(repo_dir, apply=True, repo_name=repo_dir.name)
+                self.assertFalse(res.eligible_for_batch)
+                self.assertFalse(res.applied)
+                self.assertEqual(wf_text, wf_path.read_text(encoding='utf-8'))
+                self.assertTrue(
+                    any(
+                        w['kind'] == 'reserved_runner_env_name' and w.get('env_name') == expected_var
+                        for w in res.warnings
+                    ),
+                    f'Expected reserved_runner_env_name ({expected_var}), got {res.warnings}',
+                )
+
+        # Also verify exact reserved name 'CI' fails closed
+        ci_wf = """name: Reserved CI
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collide CI
+        run: echo "${{ inputs.ci }}"
+"""
+        with mock.patch.object(gen, '_canonical_env_name_for_expr', return_value='CI'):
+            _, ci_warnings = gen.analyze_and_transform_workflow_text(ci_wf, 'ci.yml')
+            self.assertTrue(
+                any(
+                    w['kind'] == 'reserved_runner_env_name' and w.get('env_name') == 'CI'
+                    for w in ci_warnings
+                ),
+                f'Expected reserved_runner_env_name for CI, got {ci_warnings}',
+            )
+
     def test_wire_contract_test_prefers_php84_compatibility_over_unit(self) -> None:
         tests_yml = """name: Tests
 on: push
@@ -1146,9 +1311,14 @@ jobs:
             'Contract test should not be wired into unit when php84_compatibility exists',
         )
         self.assertTrue(
-            any('test_workflow_no_steps_outputs_in_run.py' in str(s.get('run', '')) for s in php84_steps),
-            'Contract test must be wired into php84_compatibility',
+            any(
+                'python3 -B -m unittest scripts/ci/test_workflow_no_steps_outputs_in_run.py'
+                in str(s.get('run', ''))
+                for s in php84_steps
+            ),
+            'Contract test must be wired into php84_compatibility with python3 -B',
         )
+        self.assertIn('sys.dont_write_bytecode = True', gen.CONTRACT_TEST_SOURCE)
         # Idempotency check
         self.assertEqual(wired, gen.wire_contract_test_in_tests_yml(wired))
 
