@@ -423,6 +423,96 @@ jobs:
             self.assertEqual(before, after)
             self.assertFalse((repo_dir / gen.CONTRACT_TEST_REL_PATH).exists())
 
+    def test_contract_test_fallback_without_pyyaml_reports_with_script_label(self) -> None:
+        namespace: dict[str, object] = {
+            '__file__': str(SCRIPT_DIR / 'test_workflow_no_steps_outputs_in_run.py'),
+            '__name__': 'test_workflow_no_steps_outputs_in_run',
+        }
+        exec(compile(gen.CONTRACT_TEST_SOURCE, 'test_workflow_no_steps_outputs_in_run.py', 'exec'), namespace)
+        find_fallback = namespace['_find_fallback']
+        assert callable(find_fallback)
+
+        block_script_wf = """name: Unsafe Script
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bad github-script
+        uses: actions/github-script@v7
+        with:
+          script: |
+            console.log("${{ steps.ini.outputs.name }}")
+"""
+        block_violations = find_fallback(block_script_wf, 'unsafe-script.yml')
+        self.assertEqual(1, len(block_violations))
+        self.assertIn('(with.script)', block_violations[0])
+        self.assertIn('steps.ini.outputs.name', block_violations[0])
+
+        inline_script_wf = """name: Unsafe Inline Script
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bad inline github-script
+        uses: actions/github-script@v7
+        with:
+          script: console.log("${{ steps.ini.outputs.version }}")
+"""
+        inline_violations = find_fallback(inline_script_wf, 'unsafe-inline-script.yml')
+        self.assertEqual(1, len(inline_violations))
+        self.assertIn('(with.script)', inline_violations[0])
+        self.assertIn('steps.ini.outputs.version', inline_violations[0])
+
+        # Also verify the generated unittest passes when PyYAML is unavailable (yaml = None).
+        namespace['yaml'] = None
+        test_cls = namespace['WorkflowNoStepsOutputsInRunTest']
+        case = test_cls('test_detects_unsafe_interpolation_in_with_script')
+        result = unittest.TestResult()
+        case.run(result)
+        self.assertTrue(
+            result.wasSuccessful(),
+            f'Expected test_detects_unsafe_interpolation_in_with_script to pass without PyYAML: '
+            f'failures={result.failures}, errors={result.errors}',
+        )
+
+    def test_wire_contract_test_prefers_php84_compatibility_over_unit(self) -> None:
+        tests_yml = """name: Tests
+on: push
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run phpunit
+        run: vendor/bin/phpunit
+  php84_compatibility:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run PHP 8.4 scan
+        run: php scripts/ci/php84-compat-scan.php "$PWD"
+"""
+        wired = gen.wire_contract_test_in_tests_yml(tests_yml)
+        parsed = yaml.safe_load(wired)
+
+        unit_steps = parsed['jobs']['unit']['steps']
+        php84_steps = parsed['jobs']['php84_compatibility']['steps']
+
+        self.assertFalse(
+            any('test_workflow_no_steps_outputs_in_run.py' in str(s.get('run', '')) for s in unit_steps),
+            'Contract test should not be wired into unit when php84_compatibility exists',
+        )
+        self.assertTrue(
+            any('test_workflow_no_steps_outputs_in_run.py' in str(s.get('run', '')) for s in php84_steps),
+            'Contract test must be wired into php84_compatibility',
+        )
+        # Idempotency check
+        self.assertEqual(wired, gen.wire_contract_test_in_tests_yml(wired))
+
 
 if __name__ == '__main__':
     unittest.main()

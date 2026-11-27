@@ -160,12 +160,13 @@ def _find_fallback(workflow_text: str, workflow_name: str) -> list[str]:
             continue
         key_indent = len(m.group(1))
         key_name = m.group(2)
+        key_label = 'with.script' if key_name == 'script' else key_name
         rest = m.group(3).strip()
         if rest and not re.match(r'^[|>][0-9+-]*$', rest):
             matches = STEPS_OUTPUTS_RE.findall(rest)
             if matches:
                 violations.append(
-                    f'{workflow_name} :: line {i + 1} ({key_name}) -> {sorted(set(matches))}'
+                    f'{workflow_name} :: line {i + 1} ({key_label}) -> {sorted(set(matches))}'
                 )
             i += 1
             continue
@@ -185,7 +186,7 @@ def _find_fallback(workflow_text: str, workflow_name: str) -> list[str]:
         matches = STEPS_OUTPUTS_RE.findall('\\n'.join(block_lines))
         if matches:
             violations.append(
-                f'{workflow_name} :: line {i + 1} ({key_name}) -> {sorted(set(matches))}'
+                f'{workflow_name} :: line {i + 1} ({key_label}) -> {sorted(set(matches))}'
             )
         i = j
     return violations
@@ -646,6 +647,7 @@ def wire_contract_test_in_tests_yml(text: str) -> str:
         'quality_contract',
         'release_contract',
         'php84_compat',
+        'php84_compatibility',
         'php_compat',
         'php82_compat',
         'lint',
