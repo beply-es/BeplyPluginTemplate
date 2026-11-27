@@ -4,7 +4,8 @@
 Design goals:
 - Surgical, line-preserving edits using PyYAML's compose marks (untouched YAML stays byte-identical).
 - Respects original shell quoting context (C1/C2):
-  - Unquoted: ${VAR} (preserves word-splitting for *targets lists; shell never executes $(...)).
+  - Unquoted: "${VAR}" for single-value vars (e.g. -c "${PHPUNIT_CONFIG}"), keeping *_TARGETS
+    unquoted as ${VAR} intentionally for bash word-splitting (shell never executes $(...)).
   - Inside double quotes ("..."): ${VAR} (keeps surrounding double quotes).
   - Inside single quotes ('...'): closes & reopens single quotes as '"${VAR}"' (or "${VAR}" if bare).
 - Fail-closed on unsupported patterns (C3): never rewrites compound expressions
@@ -90,7 +91,14 @@ CANONICAL_ENV_NAMES: dict[tuple[str, str], str] = {
 CONTRACT_TEST_REL_PATH = Path('scripts/ci/test_workflow_no_steps_outputs_in_run.py')
 
 CONTRACT_TEST_SOURCE = '''#!/usr/bin/env python3
-"""Contract test: reject ${{ steps.*.outputs.* }} interpolation inside run: and with.script blocks."""
+"""Contract test: reject ${{ (steps|needs).*.outputs.* }} interpolation inside run: and with.script blocks.
+
+Límites conocidos del detector:
+- Solo inspecciona archivos bajo `.github/workflows` (`*.yml` / `*.yaml`).
+- En modo fallback sin PyYAML (`yaml is None`), no cubre flow mappings (`{ run: ... }`) ni anclas YAML.
+- En ambos modos (PyYAML y fallback), no sigue cadenas entre comillas multilínea ni formas indirectas
+  como `format('{0}', steps.a.outputs.b)`, `steps['a'].outputs` o `toJSON(steps)`.
+"""
 
 from __future__ import annotations
 
@@ -200,6 +208,14 @@ def find_steps_outputs_in_run(workflow_text: str, workflow_name: str = '<memory>
 
 
 class WorkflowNoStepsOutputsInRunTest(unittest.TestCase):
+    def _detectors(self):
+        if yaml is not None:
+            return [
+                ('pyyaml', find_steps_outputs_in_run),
+                ('fallback', _find_fallback),
+            ]
+        return [('fallback', find_steps_outputs_in_run)]
+
     def test_detects_unsafe_interpolation_in_run_block(self) -> None:
         unsafe_workflow = """
 name: Unsafe
@@ -211,9 +227,11 @@ jobs:
       - name: Bad step
         run: echo "v${{ steps.ini.outputs.version }}"
 """
-        violations = find_steps_outputs_in_run(unsafe_workflow, 'unsafe.yml')
-        self.assertEqual(1, len(violations))
-        self.assertIn('steps.ini.outputs.version', violations[0])
+        for mode, detector in self._detectors():
+            with self.subTest(mode=mode):
+                violations = detector(unsafe_workflow, 'unsafe.yml')
+                self.assertEqual(1, len(violations))
+                self.assertIn('steps.ini.outputs.version', violations[0])
 
     def test_detects_unsafe_interpolation_in_with_script(self) -> None:
         unsafe_script_workflow = """
@@ -229,10 +247,72 @@ jobs:
           script: |
             console.log("${{ steps.ini.outputs.name }}")
 """
-        violations = find_steps_outputs_in_run(unsafe_script_workflow, 'unsafe-script.yml')
-        self.assertEqual(1, len(violations))
-        self.assertIn('with.script', violations[0])
-        self.assertIn('steps.ini.outputs.name', violations[0])
+        for mode, detector in self._detectors():
+            with self.subTest(mode=mode):
+                violations = detector(unsafe_script_workflow, 'unsafe-script.yml')
+                self.assertEqual(1, len(violations))
+                self.assertIn('with.script', violations[0])
+                self.assertIn('steps.ini.outputs.name', violations[0])
+
+    def test_detects_unsafe_interpolation_in_list_prefixed_run_block(self) -> None:
+        list_run_workflow = """
+name: List Run
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "first line safe"
+          echo "v${{ steps.ini.outputs.version }}"
+"""
+        for mode, detector in self._detectors():
+            with self.subTest(mode=mode):
+                violations = detector(list_run_workflow, 'list-run.yml')
+                self.assertEqual(1, len(violations))
+                self.assertIn('steps.ini.outputs.version', violations[0])
+
+    def test_detects_unsafe_interpolation_after_blank_line_in_run_block(self) -> None:
+        blank_line_workflow = """
+name: Blank Line Run
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Multiline with blank line
+        run: |
+          echo "before blank line"
+
+          echo "v${{ steps.ini.outputs.version }}"
+"""
+        for mode, detector in self._detectors():
+            with self.subTest(mode=mode):
+                violations = detector(blank_line_workflow, 'blank-line.yml')
+                self.assertEqual(1, len(violations))
+                self.assertIn('steps.ini.outputs.version', violations[0])
+
+    def test_detects_needs_outputs_with_and_without_spaces(self) -> None:
+        cases = (
+            ('with_spaces', '${{ needs.prepare.outputs.foo }}'),
+            ('without_spaces', '${{needs.prepare.outputs.foo}}'),
+        )
+        for label, expr in cases:
+            workflow = f"""
+name: Needs Outputs
+on: push
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bad needs output
+        run: echo "{expr}"
+"""
+            for mode, detector in self._detectors():
+                with self.subTest(case=label, mode=mode):
+                    violations = detector(workflow, f'needs-{label}.yml')
+                    self.assertEqual(1, len(violations))
+                    self.assertIn('needs.prepare.outputs.foo', violations[0])
 
     def test_allows_steps_outputs_passed_via_env(self) -> None:
         safe_workflow = """
@@ -247,7 +327,27 @@ jobs:
           PLUGIN_VERSION: ${{ steps.ini.outputs.version }}
         run: echo "v${PLUGIN_VERSION}"
 """
-        self.assertEqual([], find_steps_outputs_in_run(safe_workflow, 'safe.yml'))
+        for mode, detector in self._detectors():
+            with self.subTest(mode=mode):
+                self.assertEqual([], detector(safe_workflow, 'safe.yml'))
+
+    def test_allows_env_after_run_block_without_false_positive(self) -> None:
+        safe_env_after_run = """
+name: Safe Env After Run
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Safe step with env after run
+        run: |
+          echo "v${PLUGIN_VERSION}"
+        env:
+          PLUGIN_VERSION: ${{ steps.ini.outputs.version }}
+"""
+        for mode, detector in self._detectors():
+            with self.subTest(mode=mode):
+                self.assertEqual([], detector(safe_env_after_run, 'safe-env-after-run.yml'))
 
     def test_all_repository_workflows_forbid_steps_outputs_in_run(self) -> None:
         workflow_files = sorted(
@@ -255,18 +355,21 @@ jobs:
         )
         self.assertTrue(workflow_files, f'No workflow files found in {WORKFLOWS_DIR}')
 
-        all_violations: list[str] = []
-        for wf_path in workflow_files:
-            all_violations.extend(
-                find_steps_outputs_in_run(wf_path.read_text(encoding='utf-8'), wf_path.name)
-            )
+        for mode, detector in self._detectors():
+            with self.subTest(mode=mode):
+                all_violations: list[str] = []
+                for wf_path in workflow_files:
+                    all_violations.extend(
+                        detector(wf_path.read_text(encoding='utf-8'), wf_path.name)
+                    )
 
-        self.assertEqual(
-            [],
-            all_violations,
-            'Workflows must pass ${{ steps.*.outputs.* }} via env: instead of interpolating in run:/with.script:\\n'
-            + '\\n'.join(all_violations),
-        )
+                self.assertEqual(
+                    [],
+                    all_violations,
+                    f'[{mode}] Workflows must pass ${{{{ (steps|needs).*.outputs.* }}}} via env: '
+                    'instead of interpolating in run:/with.script:\\n'
+                    + '\\n'.join(all_violations),
+                )
 
 
 if __name__ == '__main__':
@@ -341,7 +444,8 @@ def _is_directly_single_quoted(line: str, start: int, end: int) -> bool:
 def _replace_in_run_line(line: str, mapping: dict[tuple[str, str], str]) -> str:
     """Replace all simple ${{ steps.X.outputs.Y }} in a run: line respecting original quotes.
 
-    - Unquoted -> ${VAR} (preserves word-splitting for *targets lists; shell never executes $(...)).
+    - Unquoted -> "${VAR}" for single-value vars (e.g. -c "${PHPUNIT_CONFIG}"); *_TARGETS stay
+      unquoted as ${VAR} intentionally for bash word-splitting (shell never executes $(...)).
     - Inside double quotes -> ${VAR} (keeps surrounding double quotes).
     - Directly single-quoted ('${{ ... }}') -> "${VAR}".
     - Embedded inside single quotes ('prefix-${{ ... }}-suffix') -> 'prefix-'"${VAR}"'-suffix'.
@@ -362,10 +466,18 @@ def _replace_in_run_line(line: str, mapping: dict[tuple[str, str], str]) -> str:
                 out_parts.append(line[pos:start])
                 out_parts.append(f'\'"${{{var_name}}}"\'')
                 pos = end
-        else:
-            # Both 'double' and 'none' substitute ${VAR} without adding extra double quotes.
+        elif ctx == 'double':
             out_parts.append(line[pos:start])
             out_parts.append(f'${{{var_name}}}')
+            pos = end
+        else:
+            # Unquoted ('none'): quote single-value vars (e.g. -c "${PHPUNIT_CONFIG}"),
+            # while keeping *_TARGETS unquoted intentionally for bash word-splitting.
+            out_parts.append(line[pos:start])
+            if var_name.endswith('_TARGETS'):
+                out_parts.append(f'${{{var_name}}}')
+            else:
+                out_parts.append(f'"${{{var_name}}}"')
             pos = end
     out_parts.append(line[pos:])
     return ''.join(out_parts)
