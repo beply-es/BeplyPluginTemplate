@@ -1281,6 +1281,211 @@ jobs:
                 f'Expected reserved_runner_env_name for CI, got {ci_warnings}',
             )
 
+    def test_c3_workflow_and_job_level_env_sinks_detected_in_both_modes(self) -> None:
+        wf_env = """name: Workflow Env Sink
+on: workflow_dispatch
+env:
+  WF_X: ${{ inputs.x }}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Eval workflow env
+        run: |
+          eval "echo $WF_X"
+"""
+        job_env = """name: Job Env Sink
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      JOB_X: ${{ inputs.y }}
+    steps:
+      - name: Eval job env
+        run: |
+          eval "echo $JOB_X"
+"""
+        ns: dict[str, object] = {
+            '__file__': 'scripts/ci/test_workflow_no_steps_outputs_in_run.py',
+            '__name__': 'c3_env_scope',
+        }
+        exec(compile(gen.CONTRACT_TEST_SOURCE, 'contract.py', 'exec'), ns)
+
+        for label, wf_text, expected_var in (
+            ('workflow_env', wf_env, 'WF_X'),
+            ('job_env', job_env, 'JOB_X'),
+        ):
+            for mode, fn in (('pyyaml', ns['_find_with_pyyaml']), ('fallback', ns['_find_fallback'])):
+                with self.subTest(scope=label, mode=mode):
+                    violations = fn(wf_text, f'{label}.yml')
+                    self.assertEqual(1, len(violations), f'{label} ({mode}) missed sink: {violations}')
+                    self.assertIn('shell-eval-sink', violations[0])
+                    self.assertIn(expected_var, violations[0])
+
+    def test_c4_kills_three_remaining_mutants_su_abspath_and_env_scopes(self) -> None:
+        from unittest import mock
+        import re as _re
+
+        # 1. Mutant: remove su -c from generator SHELL_EVAL_SINK_PATTERNS
+        su_wf = """name: Su Sink
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Su step
+        run: su www-data -c "echo ${{ inputs.x }}"
+"""
+        _, base_warnings = gen.analyze_and_transform_workflow_text(su_wf, 'su.yml')
+        self.assertTrue(any(w['kind'] == 'unsupported_shell_eval_sink' for w in base_warnings))
+
+        no_su_patterns = [p for p in gen.SHELL_EVAL_SINK_PATTERNS if 'su\\b' not in p]
+        self.assertEqual(len(gen.SHELL_EVAL_SINK_PATTERNS) - 1, len(no_su_patterns))
+        with mock.patch.object(gen, 'SHELL_EVAL_SINK_RE', _re.compile('|'.join(no_su_patterns))):
+            _, mut_warnings = gen.analyze_and_transform_workflow_text(su_wf, 'su.yml')
+            self.assertFalse(any(w['kind'] == 'unsupported_shell_eval_sink' for w in mut_warnings))
+
+        # 2. Mutant: remove absolute path prefix from bash/sh -c in BOTH generator and contract
+        abs_raw_wf = """name: Abs Path Sink
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Abs bash
+        run: /bin/bash -c "echo ${{ inputs.x }}"
+"""
+        _, abs_warnings = gen.analyze_and_transform_workflow_text(abs_raw_wf, 'abs.yml')
+        self.assertTrue(any(w['kind'] == 'unsupported_shell_eval_sink' for w in abs_warnings))
+
+        no_abs_gen_patterns = [p.replace(r'(?:/[^\s;|&]*?/)?', '') for p in gen.SHELL_EVAL_SINK_PATTERNS]
+        with mock.patch.object(gen, 'SHELL_EVAL_SINK_RE', _re.compile('|'.join(no_abs_gen_patterns))):
+            _, mut_abs_warnings = gen.analyze_and_transform_workflow_text(abs_raw_wf, 'abs.yml')
+            self.assertFalse(any(w['kind'] == 'unsupported_shell_eval_sink' for w in mut_abs_warnings))
+
+        abs_pat_literal = r'(?:/[^\s;|&]*?/)?'
+        self.assertIn(abs_pat_literal, gen.CONTRACT_TEST_SOURCE)
+        mut_contract_no_abs = gen.CONTRACT_TEST_SOURCE.replace(abs_pat_literal, '')
+        for force_none in (False, True):
+            with self.subTest(mutant='no_abs_path_contract', yaml_none=force_none):
+                ns: dict[str, object] = {
+                    '__file__': 'scripts/ci/test_workflow_no_steps_outputs_in_run.py',
+                    '__name__': f'mut_no_abs_{force_none}',
+                }
+                exec(compile(mut_contract_no_abs, 'mut_no_abs.py', 'exec'), ns)
+                if force_none:
+                    ns['yaml'] = None
+                case = ns['WorkflowNoStepsOutputsInRunTest']('test_rejects_untrusted_env_in_shell_eval_sinks')
+                r = unittest.TestResult()
+                case.run(r)
+                self.assertFalse(r.wasSuccessful(), f'no_abs_path mutant survived (yaml_none={force_none})')
+
+        # 3. Mutant: ignore workflow_env or job_env in contract (PyYAML + fallback)
+        for scope_name, orig_snip, mut_snip in (
+            ('pyyaml_ignore_workflow_env', 'merged_env = {**workflow_env, **job_env, **step_env}', 'merged_env = {**job_env, **step_env}'),
+            ('pyyaml_ignore_job_env', 'merged_env = {**workflow_env, **job_env, **step_env}', 'merged_env = {**workflow_env, **step_env}'),
+        ):
+            self.assertIn(orig_snip, gen.CONTRACT_TEST_SOURCE)
+            mut_src = gen.CONTRACT_TEST_SOURCE.replace(orig_snip, mut_snip, 1)
+            with self.subTest(mutant=scope_name):
+                ns = {'__file__': 'scripts/ci/test_workflow_no_steps_outputs_in_run.py', '__name__': scope_name}
+                exec(compile(mut_src, f'{scope_name}.py', 'exec'), ns)
+                case = ns['WorkflowNoStepsOutputsInRunTest']('test_rejects_untrusted_env_in_shell_eval_sinks')
+                r = unittest.TestResult()
+                case.run(r)
+                self.assertFalse(r.wasSuccessful(), f'{scope_name} mutant survived!')
+
+    def test_c5_new_shell_sinks_pipe_herestring_source_and_multiline_backslash(self) -> None:
+        cases = (
+            ('pipe_sh', 'echo "${{ inputs.x }}" | sh', 'echo "${INPUT_X}" | sh'),
+            ('pipe_abs_bash', 'echo "${{ inputs.x }}" | /bin/bash', 'echo "${INPUT_X}" | /bin/bash'),
+            ('herestring_bash', 'bash <<< "${{ inputs.x }}"', 'bash <<< "${INPUT_X}"'),
+            ('source_procsub', 'source <(echo "${{ inputs.x }}")', 'source <(echo "${INPUT_X}")'),
+            ('dot_procsub', '. <(echo "${{ inputs.x }}")', '. <(echo "${INPUT_X}")'),
+            (
+                'multiline_bash_c',
+                'bash -c \\\n            "echo ${{ inputs.x }}"',
+                'bash -c \\\n            "echo ${INPUT_X}"',
+            ),
+        )
+        for name, raw_cmd, env_cmd in cases:
+            with self.subTest(sink=name), tempfile.TemporaryDirectory() as tmp:
+                repo_dir = Path(tmp) / f'C5_{name}'
+                wf_dir = repo_dir / '.github' / 'workflows'
+                wf_dir.mkdir(parents=True)
+                raw_wf = f"""name: C5 {name}
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sink {name}
+        run: |
+          {raw_cmd}
+"""
+                wf_path = wf_dir / 'c5.yml'
+                wf_path.write_text(raw_wf, encoding='utf-8')
+                res = gen.process_repository(repo_dir, apply=True, repo_name=repo_dir.name)
+                self.assertFalse(res.eligible_for_batch, f'Generator must fail closed on {name}')
+                self.assertTrue(
+                    any(w['kind'] == 'unsupported_shell_eval_sink' for w in res.warnings),
+                    f'Expected unsupported_shell_eval_sink for {name}, got {res.warnings}',
+                )
+
+                env_wf = f"""name: C5 Env {name}
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Env Sink {name}
+        env:
+          INPUT_X: ${{{{ inputs.x }}}}
+        run: |
+          {env_cmd}
+"""
+                ns: dict[str, object] = {
+                    '__file__': str(repo_dir / gen.CONTRACT_TEST_REL_PATH),
+                    '__name__': f'c5_contract_{name}',
+                }
+                exec(compile(gen.CONTRACT_TEST_SOURCE, 'contract.py', 'exec'), ns)
+                v_yaml = ns['_find_with_pyyaml'](env_wf, f'{name}.yml')
+                v_fb = ns['_find_fallback'](env_wf, f'{name}.yml')
+                self.assertEqual(1, len(v_yaml), f'PyYAML missed {name}: {v_yaml}')
+                self.assertEqual(1, len(v_fb), f'Fallback missed {name}: {v_fb}')
+
+        # Verify interpreter limits documented in CONTRACT_TEST_SOURCE
+        for doc_token in ('python3 -c', 'node -e', 'awk'):
+            self.assertIn(doc_token, gen.CONTRACT_TEST_SOURCE)
+
+    def test_c6_generator_adds_pycache_and_pyc_to_gitignore_idempotently(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = _copy_fixture('BeplyA3', Path(tmp))
+            gi_path = repo_dir / '.gitignore'
+            gi_path.write_text('vendor/\n', encoding='utf-8')
+
+            first = gen.process_repository(repo_dir, apply=True, repo_name='BeplyA3')
+            self.assertTrue(first.eligible_for_batch)
+            self.assertIn('.gitignore', first.changed_files)
+            gi_after = gi_path.read_text(encoding='utf-8')
+            self.assertIn('__pycache__/', gi_after)
+            self.assertIn('*.pyc', gi_after)
+            self.assertIn('vendor/', gi_after)
+
+            # 2nd pass must be idempotent (diff = 0)
+            second = gen.process_repository(repo_dir, apply=True, repo_name='BeplyA3')
+            self.assertEqual([], second.changed_files)
+            self.assertEqual(0, second.diff_bytes)
+
+            # Pre-existing .pyc under scripts/ci must fail closed
+            pyc_file = repo_dir / 'scripts' / 'ci' / '__pycache__' / 'stale.pyc'
+            pyc_file.parent.mkdir(parents=True, exist_ok=True)
+            pyc_file.write_bytes(b'\x00')
+            dirty = gen.process_repository(repo_dir, apply=True, repo_name='BeplyA3')
+            self.assertFalse(dirty.eligible_for_batch)
+            self.assertTrue(any(w['kind'] == 'unclean_pyc_artifacts' for w in dirty.warnings))
+
     def test_wire_contract_test_prefers_php84_compatibility_over_unit(self) -> None:
         tests_yml = """name: Tests
 on: push
