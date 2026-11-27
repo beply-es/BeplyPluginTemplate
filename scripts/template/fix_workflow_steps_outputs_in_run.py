@@ -91,13 +91,18 @@ CANONICAL_ENV_NAMES: dict[tuple[str, str], str] = {
 CONTRACT_TEST_REL_PATH = Path('scripts/ci/test_workflow_no_steps_outputs_in_run.py')
 
 CONTRACT_TEST_SOURCE = '''#!/usr/bin/env python3
-"""Contract test: reject ${{ (steps|needs).*.outputs.* }} interpolation inside run: and with.script blocks.
+"""Contract test: reject untrusted GitHub Actions expressions inside run: and with.script blocks.
+
+Cubre `steps.*.outputs`, `needs.*.outputs`, `inputs.*` / `inputs['...']` / `toJSON(inputs)`,
+`github.event` (incl. `github.event.*`, `github.event['...']`, `toJSON(github.event)`),
+`github.head_ref`, `github.base_ref`, `github.ref_name` y expresiones con llaves internas como
+`format('{0}', ...)`.
 
 Límites conocidos del detector:
 - Solo inspecciona archivos bajo `.github/workflows` (`*.yml` / `*.yaml`).
 - En modo fallback sin PyYAML (`yaml is None`), no cubre flow mappings (`{ run: ... }`) ni anclas YAML.
 - En ambos modos (PyYAML y fallback), no sigue cadenas entre comillas multilínea ni formas indirectas
-  como `format('{0}', steps.a.outputs.b)`, `steps['a'].outputs` o `toJSON(steps)`.
+  de `steps`/`needs` como `steps['a'].outputs` o `toJSON(steps)`.
 """
 
 from __future__ import annotations
@@ -115,15 +120,17 @@ except ImportError:  # pragma: no cover - fallback for runners without PyYAML
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS_DIR = ROOT / '.github' / 'workflows'
 UNTRUSTED_CONTEXT_PATTERNS = (
-    r'\\b(?:steps|needs)\\.[^}]+\\.outputs\\b',
-    r'\\binputs\\.[A-Za-z0-9_.-]+',
-    r'\\bgithub\\.event\\.[A-Za-z0-9_.-]+',
+    r'\\b(?:steps|needs)\\.(?:\\}(?!\\})|[^}])+\\.outputs\\b',
+    r'\\binputs(?:\\.|\\[)|\\btoJSON\\s*\\(\\s*inputs\\s*\\)',
+    r'\\bgithub\\.event\\b',
     r'\\bgithub\\.head_ref\\b',
     r'\\bgithub\\.base_ref\\b',
     r'\\bgithub\\.ref_name\\b',
 )
 STEPS_OUTPUTS_RE = re.compile(
-    r'\\$\\{\\{[^}]*(?:' + '|'.join(UNTRUSTED_CONTEXT_PATTERNS) + r')[^}]*\\}\\}',
+    r'\\$\\{\\{(?:\\}(?!\\})|[^}])*(?:'
+    + '|'.join(UNTRUSTED_CONTEXT_PATTERNS)
+    + r')(?:\\}(?!\\})|[^}])*\\}\\}',
     re.DOTALL,
 )
 
@@ -429,6 +436,74 @@ jobs:
                     violations = detector(workflow, f'ref-name-{label}.yml')
                     self.assertEqual(1, len(violations))
                     self.assertIn('github.ref_name', violations[0])
+
+    def test_detects_tojson_github_event(self) -> None:
+        workflow = """
+name: ToJSON Event
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bad toJSON(github.event)
+        run: echo "${{ toJSON(github.event) }}"
+"""
+        for mode, detector in self._detectors():
+            with self.subTest(mode=mode):
+                violations = detector(workflow, 'tojson-event.yml')
+                self.assertEqual(1, len(violations))
+                self.assertIn('toJSON(github.event)', violations[0])
+
+    def test_detects_bracket_indexed_github_event(self) -> None:
+        workflow = """
+name: Bracket Event
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bad bracket github.event
+        run: echo "${{ github.event['pull_request']['title'] }}"
+"""
+        for mode, detector in self._detectors():
+            with self.subTest(mode=mode):
+                violations = detector(workflow, 'bracket-event.yml')
+                self.assertEqual(1, len(violations))
+                self.assertIn("github.event['pull_request']['title']", violations[0])
+
+    def test_detects_bracket_indexed_inputs(self) -> None:
+        workflow = """
+name: Bracket Inputs
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bad bracket inputs
+        run: echo "${{ inputs['x'] }}"
+"""
+        for mode, detector in self._detectors():
+            with self.subTest(mode=mode):
+                violations = detector(workflow, 'bracket-inputs.yml')
+                self.assertEqual(1, len(violations))
+                self.assertIn("inputs['x']", violations[0])
+
+    def test_detects_format_with_braces_and_github_event(self) -> None:
+        workflow = """
+name: Format Event
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bad format with braces
+        run: echo "${{ format('{0}', github.event.pull_request.title) }}"
+"""
+        for mode, detector in self._detectors():
+            with self.subTest(mode=mode):
+                violations = detector(workflow, 'format-event.yml')
+                self.assertEqual(1, len(violations))
+                self.assertIn('github.event.pull_request.title', violations[0])
 
     def test_allows_steps_outputs_passed_via_env(self) -> None:
         safe_workflow = """

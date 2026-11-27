@@ -657,12 +657,12 @@ jobs:
                     res.wasSuccessful(),
                     f'Baseline failed (yaml_none={force_none}): failures={res.failures}, errors={res.errors}',
                 )
-                self.assertGreaterEqual(res.testsRun, 13)
+                self.assertGreaterEqual(res.testsRun, 17)
 
             # Mutants: removing each untrusted context pattern individually MUST fail in BOTH modes.
             context_mutants = (
-                ('M_inputs', "    r'\\binputs\\.[A-Za-z0-9_.-]+',\n"),
-                ('M_github_event', "    r'\\bgithub\\.event\\.[A-Za-z0-9_.-]+',\n"),
+                ('M_inputs', "    r'\\binputs(?:\\.|\\[)|\\btoJSON\\s*\\(\\s*inputs\\s*\\)',\n"),
+                ('M_github_event', "    r'\\bgithub\\.event\\b',\n"),
                 ('M_github_head_ref', "    r'\\bgithub\\.head_ref\\b',\n"),
                 ('M_github_base_ref', "    r'\\bgithub\\.base_ref\\b',\n"),
                 ('M_github_ref_name', "    r'\\bgithub\\.ref_name\\b',\n"),
