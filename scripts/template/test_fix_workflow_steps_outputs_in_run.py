@@ -1593,6 +1593,118 @@ jobs:
             _, mw = gen.analyze_and_transform_workflow_text(wf_text, 'tests.yml')
             self.assertTrue(len(mw) > 0, 'Generator mutant ignoring env.* must fail closed')
 
+    def test_c1_env_rewrite_requires_exact_case_static_definition_and_kills_upper_mutant(self) -> None:
+        from unittest import mock
+
+        # Case 1: undefined env vars (HOME, GITHUB_SHA) MUST fail closed
+        for label, expr in (
+            ('undefined_HOME', '${{ env.HOME }}'),
+            ('undefined_GITHUB_SHA', '${{ env.GITHUB_SHA }}'),
+        ):
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
+                repo_dir = Path(tmp) / label
+                wf_dir = repo_dir / '.github' / 'workflows'
+                wf_dir.mkdir(parents=True)
+                wf_text = f"""name: Undefined Env
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print undefined env
+        run: echo "{expr}"
+"""
+                wf_path = wf_dir / 'ci.yml'
+                wf_path.write_text(wf_text, encoding='utf-8')
+                res = gen.process_repository(repo_dir, apply=True, repo_name=label)
+                self.assertFalse(res.eligible_for_batch, f'{label} must fail closed')
+                self.assertFalse(res.applied)
+                self.assertEqual(wf_text, wf_path.read_text(encoding='utf-8'))
+                self.assertTrue(
+                    any(w['kind'] == 'undefined_or_case_mismatched_env_var' for w in res.warnings),
+                    f'Expected undefined_or_case_mismatched_env_var for {label}, got {res.warnings}',
+                )
+                cli = subprocess.run(
+                    [
+                        sys.executable,
+                        '-B',
+                        str(SCRIPT_DIR / 'fix_workflow_steps_outputs_in_run.py'),
+                        '--repo',
+                        str(repo_dir),
+                        '--dry-run',
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(0, cli.returncode)
+
+        # Case 2: case-mismatched env var (WF defined, env.wf referenced) MUST fail closed
+        case_mismatch_wf = """name: Case Mismatch
+on: push
+env:
+  WF: foo
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print lower wf
+        run: echo "${{ env.wf }}"
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp) / 'CaseMismatch'
+            wf_dir = repo_dir / '.github' / 'workflows'
+            wf_dir.mkdir(parents=True)
+            wf_path = wf_dir / 'ci.yml'
+            wf_path.write_text(case_mismatch_wf, encoding='utf-8')
+
+            res = gen.process_repository(repo_dir, apply=True, repo_name='CaseMismatch')
+            self.assertFalse(res.eligible_for_batch, 'env.wf with only WF defined must fail closed')
+            self.assertFalse(res.applied)
+            self.assertEqual(case_mismatch_wf, wf_path.read_text(encoding='utf-8'))
+            self.assertTrue(
+                any(
+                    w['kind'] == 'undefined_or_case_mismatched_env_var' and w.get('env_name') == 'wf'
+                    for w in res.warnings
+                ),
+                f'Expected undefined_or_case_mismatched_env_var (wf), got {res.warnings}',
+            )
+
+            # Reviewer's .upper() mutant: case-insensitive comparison would wrongly mark it eligible!
+            with mock.patch.object(
+                gen,
+                '_env_var_defined_in_scope',
+                side_effect=lambda name, defined: name.upper() in {d.upper() for d in defined},
+            ):
+                mut_res = gen.process_repository(repo_dir, apply=False, repo_name='CaseMismatch')
+                self.assertTrue(mut_res.eligible_for_batch, '.upper() mutant should wrongly accept case mismatch')
+
+        # Good case: PLUGIN_FOLDER defined at workflow, job, OR step level rewrites cleanly & idempotently
+        for scope_name, good_wf in (
+            (
+                'workflow_level',
+                'name: T\non: push\nenv:\n  PLUGIN_FOLDER: Demo\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ${{ env.PLUGIN_FOLDER }}\n',
+            ),
+            (
+                'job_level',
+                'name: T\non: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n    env:\n      PLUGIN_FOLDER: Demo\n    steps:\n      - run: echo ${{ env.PLUGIN_FOLDER }}\n',
+            ),
+            (
+                'step_level',
+                'name: T\non: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - env:\n          PLUGIN_FOLDER: Demo\n        run: echo ${{ env.PLUGIN_FOLDER }}\n',
+            ),
+        ):
+            with self.subTest(good_scope=scope_name), tempfile.TemporaryDirectory() as tmp:
+                repo_dir = Path(tmp) / f'Good_{scope_name}'
+                wf_dir = repo_dir / '.github' / 'workflows'
+                wf_dir.mkdir(parents=True)
+                wf_path = wf_dir / 'ci.yml'
+                wf_path.write_text(good_wf, encoding='utf-8')
+                r1 = gen.process_repository(repo_dir, apply=True, repo_name=repo_dir.name)
+                self.assertTrue(r1.eligible_for_batch, f'{scope_name} should be eligible: {r1.warnings}')
+                self.assertIn('echo "${PLUGIN_FOLDER}"', wf_path.read_text(encoding='utf-8'))
+                r2 = gen.process_repository(repo_dir, apply=True, repo_name=repo_dir.name)
+                self.assertEqual(0, r2.diff_bytes)
+
     def test_wire_contract_test_does_not_introduce_double_blank_line(self) -> None:
         tests_yml = """name: Tests
 on: push

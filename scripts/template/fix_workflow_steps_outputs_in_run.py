@@ -1141,6 +1141,23 @@ def _find_heredoc_output_interpolations(run_script: str) -> list[str]:
     return sorted(set(found))
 
 
+def _collect_static_env_names(mapping_node: yaml.MappingNode) -> set[str]:
+    """Return exact (case-sensitive) keys statically defined in a node's env: mapping."""
+    env_pair = _get_mapping_pair(mapping_node, 'env')
+    if not env_pair or not isinstance(env_pair[1], yaml.MappingNode):
+        return set()
+    return {
+        k.value
+        for k, _ in env_pair[1].value
+        if isinstance(k, yaml.ScalarNode)
+    }
+
+
+def _env_var_defined_in_scope(var_name: str, defined_env_names: set[str]) -> bool:
+    """Case-sensitive membership check: ${{ env.X }} -> "${X}" is only safe when X is statically defined with exact case."""
+    return var_name in defined_env_names
+
+
 def analyze_and_transform_workflow_text(
     text: str, workflow_name: str = '<memory>'
 ) -> tuple[str, list[dict[str, Any]]]:
@@ -1163,6 +1180,7 @@ def analyze_and_transform_workflow_text(
         return text, warnings
 
     workflow_default_shell = _get_defaults_run_shell(root)
+    workflow_env_names = _collect_static_env_names(root)
     lines = text.splitlines(keepends=True)
     insertions: list[tuple[int, list[str]]] = []
 
@@ -1171,6 +1189,7 @@ def analyze_and_transform_workflow_text(
         if not isinstance(job_node, yaml.MappingNode):
             continue
         job_default_shell = _get_defaults_run_shell(job_node) or workflow_default_shell
+        job_env_names = workflow_env_names | _collect_static_env_names(job_node)
         steps_pair = _get_mapping_pair(job_node, 'steps')
         if not steps_pair or not isinstance(steps_pair[1], yaml.SequenceNode):
             continue
@@ -1298,13 +1317,28 @@ def analyze_and_transform_workflow_text(
                             if norm is not None:
                                 existing_by_expr[norm] = ek.value
 
+            step_defined_env_names = job_env_names | used_env_names
             expr_to_var: dict[str, str] = {}
             new_env_entries: list[tuple[str, str]] = []
             reserved_collision = False
             for expr_body in exprs_in_order:
                 if expr_body.startswith('env.'):
-                    # Already an environment variable; reference directly as "${VAR}" without duplicating env:.
-                    expr_to_var[expr_body] = expr_body[len('env.') :]
+                    env_var = expr_body[len('env.') :]
+                    if not _env_var_defined_in_scope(env_var, step_defined_env_names):
+                        warnings.append(
+                            {
+                                'kind': 'undefined_or_case_mismatched_env_var',
+                                'workflow': workflow_name,
+                                'job': job_id,
+                                'step': step_label,
+                                'env_name': env_var,
+                                'expressions': [f'${{{{ {expr_body} }}}}'],
+                            }
+                        )
+                        reserved_collision = True
+                        break
+                    # Statically defined with exact case; reference directly as "${VAR}" without duplicating env:.
+                    expr_to_var[expr_body] = env_var
                     continue
                 if expr_body in existing_by_expr:
                     expr_to_var[expr_body] = existing_by_expr[expr_body]
