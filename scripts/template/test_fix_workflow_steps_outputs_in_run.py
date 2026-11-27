@@ -633,6 +633,165 @@ jobs:
             )
             self.assertNotEqual(expected_not, bad_probe.stdout)
 
+    def test_contract_test_kills_untrusted_context_mutants_in_both_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = _copy_fixture('BeplyA3', Path(tmp))
+            gen.process_repository(repo_dir, apply=True, repo_name='BeplyA3')
+            test_file = repo_dir / gen.CONTRACT_TEST_REL_PATH
+
+            # Baseline: full suite passes in BOTH PyYAML and yaml=None modes with >=13 tests.
+            for force_none in (False, True):
+                ns: dict[str, object] = {
+                    '__file__': str(test_file),
+                    '__name__': f'baseline_none_{force_none}',
+                }
+                exec(compile(gen.CONTRACT_TEST_SOURCE, str(test_file), 'exec'), ns)
+                if force_none:
+                    ns['yaml'] = None
+                suite = unittest.TestLoader().loadTestsFromTestCase(
+                    ns['WorkflowNoStepsOutputsInRunTest']
+                )
+                res = unittest.TestResult()
+                suite.run(res)
+                self.assertTrue(
+                    res.wasSuccessful(),
+                    f'Baseline failed (yaml_none={force_none}): failures={res.failures}, errors={res.errors}',
+                )
+                self.assertGreaterEqual(res.testsRun, 17)
+
+            # Mutants: removing each untrusted context pattern individually MUST fail in BOTH modes.
+            context_mutants = (
+                ('M_inputs', "    r'\\binputs(?:\\.|\\[)|\\btoJSON\\s*\\(\\s*inputs\\s*\\)',\n"),
+                ('M_github_event', "    r'\\bgithub\\.event\\b',\n"),
+                ('M_github_head_ref', "    r'\\bgithub\\.head_ref\\b',\n"),
+                ('M_github_base_ref', "    r'\\bgithub\\.base_ref\\b',\n"),
+                ('M_github_ref_name', "    r'\\bgithub\\.ref_name\\b',\n"),
+            )
+            for mutant_name, pattern_line in context_mutants:
+                self.assertIn(
+                    pattern_line,
+                    gen.CONTRACT_TEST_SOURCE,
+                    f'Pattern line for {mutant_name} not found in CONTRACT_TEST_SOURCE',
+                )
+                mutated_src = gen.CONTRACT_TEST_SOURCE.replace(pattern_line, '', 1)
+                for force_none in (False, True):
+                    with self.subTest(mutant=mutant_name, yaml_none=force_none):
+                        ns = {
+                            '__file__': str(test_file),
+                            '__name__': f'{mutant_name}_none_{force_none}',
+                        }
+                        exec(compile(mutated_src, f'{mutant_name}.py', 'exec'), ns)
+                        if force_none:
+                            ns['yaml'] = None
+                        suite = unittest.TestLoader().loadTestsFromTestCase(
+                            ns['WorkflowNoStepsOutputsInRunTest']
+                        )
+                        res = unittest.TestResult()
+                        suite.run(res)
+                        self.assertFalse(
+                            res.wasSuccessful(),
+                            f'Mutant {mutant_name} survived (yaml_none={force_none})!',
+                        )
+
+    def test_fail_closed_on_heredocs_and_non_posix_shells(self) -> None:
+        cases = (
+            (
+                'heredoc_unquoted',
+                'unsupported_heredoc_interpolation',
+                """name: Heredoc Unquoted
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write file with unquoted heredoc
+        run: |
+          cat <<EOF > version.txt
+          version=${{ steps.ini.outputs.version }}
+          EOF
+""",
+            ),
+            (
+                'heredoc_quoted',
+                'unsupported_heredoc_interpolation',
+                """name: Heredoc Quoted
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write file with quoted heredoc
+        run: |
+          cat <<'EOF' > name.txt
+          name=${{ steps.ini.outputs.name }}
+          EOF
+""",
+            ),
+            (
+                'shell_python',
+                'unsupported_non_posix_shell',
+                """name: Python Shell
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run python
+        shell: python
+        run: |
+          print("${{ steps.ini.outputs.name }}")
+""",
+            ),
+            (
+                'shell_pwsh',
+                'unsupported_non_posix_shell',
+                """name: PowerShell
+on: push
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Run pwsh
+        shell: pwsh
+        run: |
+          Write-Host "${{ steps.ini.outputs.version }}"
+""",
+            ),
+        )
+
+        for case_name, expected_kind, original in cases:
+            with self.subTest(case=case_name), tempfile.TemporaryDirectory() as tmp:
+                repo_dir = Path(tmp) / f'Repo_{case_name}'
+                wf_dir = repo_dir / '.github' / 'workflows'
+                wf_dir.mkdir(parents=True)
+                wf_path = wf_dir / 'ci.yml'
+                wf_path.write_text(original, encoding='utf-8')
+
+                res = gen.process_repository(repo_dir, apply=True, repo_name=repo_dir.name)
+                self.assertFalse(res.eligible_for_batch, f'{case_name} must fail closed')
+                self.assertFalse(res.applied, f'{case_name} must not apply changes')
+                self.assertEqual([], res.changed_files)
+                self.assertEqual(original, wf_path.read_text(encoding='utf-8'))
+                self.assertTrue(
+                    any(w['kind'] == expected_kind for w in res.warnings),
+                    f'Expected {expected_kind} for {case_name}, got {res.warnings}',
+                )
+
+                cli = subprocess.run(
+                    [
+                        sys.executable,
+                        '-B',
+                        str(SCRIPT_DIR / 'fix_workflow_steps_outputs_in_run.py'),
+                        '--repo',
+                        str(repo_dir),
+                        '--dry-run',
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(0, cli.returncode, f'CLI must exit non-zero for {case_name}')
+                self.assertIn(expected_kind, cli.stdout)
+
     def test_wire_contract_test_prefers_php84_compatibility_over_unit(self) -> None:
         tests_yml = """name: Tests
 on: push

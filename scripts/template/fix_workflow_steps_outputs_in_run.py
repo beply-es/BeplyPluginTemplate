@@ -91,13 +91,18 @@ CANONICAL_ENV_NAMES: dict[tuple[str, str], str] = {
 CONTRACT_TEST_REL_PATH = Path('scripts/ci/test_workflow_no_steps_outputs_in_run.py')
 
 CONTRACT_TEST_SOURCE = '''#!/usr/bin/env python3
-"""Contract test: reject ${{ (steps|needs).*.outputs.* }} interpolation inside run: and with.script blocks.
+"""Contract test: reject untrusted GitHub Actions expressions inside run: and with.script blocks.
+
+Cubre `steps.*.outputs`, `needs.*.outputs`, `inputs.*` / `inputs['...']` / `toJSON(inputs)`,
+`github.event` (incl. `github.event.*`, `github.event['...']`, `toJSON(github.event)`),
+`github.head_ref`, `github.base_ref`, `github.ref_name` y expresiones con llaves internas como
+`format('{0}', ...)`.
 
 Límites conocidos del detector:
 - Solo inspecciona archivos bajo `.github/workflows` (`*.yml` / `*.yaml`).
 - En modo fallback sin PyYAML (`yaml is None`), no cubre flow mappings (`{ run: ... }`) ni anclas YAML.
 - En ambos modos (PyYAML y fallback), no sigue cadenas entre comillas multilínea ni formas indirectas
-  como `format('{0}', steps.a.outputs.b)`, `steps['a'].outputs` o `toJSON(steps)`.
+  de `steps`/`needs` como `steps['a'].outputs` o `toJSON(steps)`.
 """
 
 from __future__ import annotations
@@ -114,7 +119,20 @@ except ImportError:  # pragma: no cover - fallback for runners without PyYAML
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS_DIR = ROOT / '.github' / 'workflows'
-STEPS_OUTPUTS_RE = re.compile(r'\\$\\{\\{[^}]*\\b(?:steps|needs)\\.[^}]+\\.outputs\\b[^}]*\\}\\}', re.DOTALL)
+UNTRUSTED_CONTEXT_PATTERNS = (
+    r'\\b(?:steps|needs)\\.(?:\\}(?!\\})|[^}])+\\.outputs\\b',
+    r'\\binputs(?:\\.|\\[)|\\btoJSON\\s*\\(\\s*inputs\\s*\\)',
+    r'\\bgithub\\.event\\b',
+    r'\\bgithub\\.head_ref\\b',
+    r'\\bgithub\\.base_ref\\b',
+    r'\\bgithub\\.ref_name\\b',
+)
+STEPS_OUTPUTS_RE = re.compile(
+    r'\\$\\{\\{(?:\\}(?!\\})|[^}])*(?:'
+    + '|'.join(UNTRUSTED_CONTEXT_PATTERNS)
+    + r')(?:\\}(?!\\})|[^}])*\\}\\}',
+    re.DOTALL,
+)
 
 
 def _find_with_pyyaml(workflow_text: str, workflow_name: str) -> list[str]:
@@ -313,6 +331,179 @@ jobs:
                     violations = detector(workflow, f'needs-{label}.yml')
                     self.assertEqual(1, len(violations))
                     self.assertIn('needs.prepare.outputs.foo', violations[0])
+
+    def test_detects_inputs_context(self) -> None:
+        for label, expr in (
+            ('with_spaces', '${{ inputs.x }}'),
+            ('without_spaces', '${{inputs.x}}'),
+        ):
+            workflow = f"""
+name: Inputs Context
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bad inputs
+        run: echo "{expr}"
+"""
+            for mode, detector in self._detectors():
+                with self.subTest(case=label, mode=mode):
+                    violations = detector(workflow, f'inputs-{label}.yml')
+                    self.assertEqual(1, len(violations))
+                    self.assertIn('inputs.x', violations[0])
+
+    def test_detects_github_event_context(self) -> None:
+        for label, expr in (
+            ('with_spaces', '${{ github.event.pull_request.title }}'),
+            ('without_spaces', '${{github.event.issue.title}}'),
+        ):
+            workflow = f"""
+name: GitHub Event Context
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bad github.event
+        run: echo "{expr}"
+"""
+            for mode, detector in self._detectors():
+                with self.subTest(case=label, mode=mode):
+                    violations = detector(workflow, f'github-event-{label}.yml')
+                    self.assertEqual(1, len(violations))
+                    self.assertIn('github.event.', violations[0])
+
+    def test_detects_github_head_ref_context(self) -> None:
+        for label, expr in (
+            ('with_spaces', '${{ github.head_ref }}'),
+            ('without_spaces', '${{github.head_ref}}'),
+        ):
+            workflow = f"""
+name: GitHub Head Ref
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bad head_ref
+        run: echo "{expr}"
+"""
+            for mode, detector in self._detectors():
+                with self.subTest(case=label, mode=mode):
+                    violations = detector(workflow, f'head-ref-{label}.yml')
+                    self.assertEqual(1, len(violations))
+                    self.assertIn('github.head_ref', violations[0])
+
+    def test_detects_github_base_ref_context(self) -> None:
+        for label, expr in (
+            ('with_spaces', '${{ github.base_ref }}'),
+            ('without_spaces', '${{github.base_ref}}'),
+        ):
+            workflow = f"""
+name: GitHub Base Ref
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bad base_ref
+        run: echo "{expr}"
+"""
+            for mode, detector in self._detectors():
+                with self.subTest(case=label, mode=mode):
+                    violations = detector(workflow, f'base-ref-{label}.yml')
+                    self.assertEqual(1, len(violations))
+                    self.assertIn('github.base_ref', violations[0])
+
+    def test_detects_github_ref_name_context(self) -> None:
+        for label, expr in (
+            ('with_spaces', '${{ github.ref_name }}'),
+            ('without_spaces', '${{github.ref_name}}'),
+        ):
+            workflow = f"""
+name: GitHub Ref Name
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bad ref_name
+        run: echo "{expr}"
+"""
+            for mode, detector in self._detectors():
+                with self.subTest(case=label, mode=mode):
+                    violations = detector(workflow, f'ref-name-{label}.yml')
+                    self.assertEqual(1, len(violations))
+                    self.assertIn('github.ref_name', violations[0])
+
+    def test_detects_tojson_github_event(self) -> None:
+        workflow = """
+name: ToJSON Event
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bad toJSON(github.event)
+        run: echo "${{ toJSON(github.event) }}"
+"""
+        for mode, detector in self._detectors():
+            with self.subTest(mode=mode):
+                violations = detector(workflow, 'tojson-event.yml')
+                self.assertEqual(1, len(violations))
+                self.assertIn('toJSON(github.event)', violations[0])
+
+    def test_detects_bracket_indexed_github_event(self) -> None:
+        workflow = """
+name: Bracket Event
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bad bracket github.event
+        run: echo "${{ github.event['pull_request']['title'] }}"
+"""
+        for mode, detector in self._detectors():
+            with self.subTest(mode=mode):
+                violations = detector(workflow, 'bracket-event.yml')
+                self.assertEqual(1, len(violations))
+                self.assertIn("github.event['pull_request']['title']", violations[0])
+
+    def test_detects_bracket_indexed_inputs(self) -> None:
+        workflow = """
+name: Bracket Inputs
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bad bracket inputs
+        run: echo "${{ inputs['x'] }}"
+"""
+        for mode, detector in self._detectors():
+            with self.subTest(mode=mode):
+                violations = detector(workflow, 'bracket-inputs.yml')
+                self.assertEqual(1, len(violations))
+                self.assertIn("inputs['x']", violations[0])
+
+    def test_detects_format_with_braces_and_github_event(self) -> None:
+        workflow = """
+name: Format Event
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bad format with braces
+        run: echo "${{ format('{0}', github.event.pull_request.title) }}"
+"""
+        for mode, detector in self._detectors():
+            with self.subTest(mode=mode):
+                violations = detector(workflow, 'format-event.yml')
+                self.assertEqual(1, len(violations))
+                self.assertIn('github.event.pull_request.title', violations[0])
 
     def test_allows_steps_outputs_passed_via_env(self) -> None:
         safe_workflow = """
@@ -517,13 +708,67 @@ def _normalize_expr(expr: str) -> tuple[str, str] | None:
     return (m.group(1), m.group(2))
 
 
+POSIX_SHELL_NAMES = frozenset({'bash', 'sh', 'dash', 'zsh'})
+HEREDOC_START_RE = re.compile(
+    r'(?<!<)<<(?!<)(-?)\s*(?:(["\'])([A-Za-z0-9_.-]+)\2|\\?([A-Za-z0-9_.-]+))'
+)
+
+
+def _is_posix_shell(shell_value: str | None) -> bool:
+    """Return True if shell_value is unset or resolves to a POSIX shell (bash/sh/dash/zsh)."""
+    if shell_value is None:
+        return True
+    stripped = shell_value.strip()
+    if not stripped:
+        return True
+    first_token = stripped.split()[0]
+    return Path(first_token).name.lower() in POSIX_SHELL_NAMES
+
+
+def _get_defaults_run_shell(mapping_node: yaml.MappingNode) -> str | None:
+    defaults_pair = _get_mapping_pair(mapping_node, 'defaults')
+    if not defaults_pair or not isinstance(defaults_pair[1], yaml.MappingNode):
+        return None
+    run_pair = _get_mapping_pair(defaults_pair[1], 'run')
+    if not run_pair or not isinstance(run_pair[1], yaml.MappingNode):
+        return None
+    shell_pair = _get_mapping_pair(run_pair[1], 'shell')
+    if shell_pair and isinstance(shell_pair[1], yaml.ScalarNode):
+        return shell_pair[1].value
+    return None
+
+
+def _find_heredoc_output_interpolations(run_script: str) -> list[str]:
+    """Return any ${{ (steps|needs).*.outputs.* }} expressions inside a heredoc body."""
+    found: list[str] = []
+    pending_delims: list[tuple[str, bool]] = []
+    for line in run_script.splitlines():
+        if pending_delims:
+            delim, strip_tabs = pending_delims[0]
+            candidate = line.lstrip('\t') if strip_tabs else line
+            if candidate == delim:
+                pending_delims.pop(0)
+                continue
+            found.extend(POST_TRANSFORM_RESIDUAL_RE.findall(line))
+            continue
+        if line.lstrip().startswith('#'):
+            continue
+        for m in HEREDOC_START_RE.finditer(line):
+            strip_tabs = m.group(1) == '-'
+            delim = m.group(3) or m.group(4)
+            if delim:
+                pending_delims.append((delim, strip_tabs))
+    return sorted(set(found))
+
+
 def analyze_and_transform_workflow_text(
     text: str, workflow_name: str = '<memory>'
 ) -> tuple[str, list[dict[str, Any]]]:
     """Move supported ${{ steps.*.outputs.* }} from run: into env:; report unsupported ones.
 
-    Returns (transformed_text, warnings). Steps with compound expressions or with.script
-    interpolations are never rewritten and are recorded in warnings so callers fail closed.
+    Returns (transformed_text, warnings). Steps with compound expressions, with.script,
+    heredoc interpolations, or non-POSIX shell: are never rewritten and are recorded in
+    warnings so callers fail closed.
     """
     warnings: list[dict[str, Any]] = []
     try:
@@ -537,6 +782,7 @@ def analyze_and_transform_workflow_text(
     if not jobs_pair or not isinstance(jobs_pair[1], yaml.MappingNode):
         return text, warnings
 
+    workflow_default_shell = _get_defaults_run_shell(root)
     lines = text.splitlines(keepends=True)
     insertions: list[tuple[int, list[str]]] = []
 
@@ -544,6 +790,7 @@ def analyze_and_transform_workflow_text(
         job_id = job_k.value if isinstance(job_k, yaml.ScalarNode) else '<job>'
         if not isinstance(job_node, yaml.MappingNode):
             continue
+        job_default_shell = _get_defaults_run_shell(job_node) or workflow_default_shell
         steps_pair = _get_mapping_pair(job_node, 'steps')
         if not steps_pair or not isinstance(steps_pair[1], yaml.SequenceNode):
             continue
@@ -580,6 +827,41 @@ def analyze_and_transform_workflow_text(
                 continue
             run_k, run_v = run_pair
             if not isinstance(run_v, yaml.ScalarNode):
+                continue
+
+            # Fail-closed on non-POSIX shell (python, pwsh, cmd, etc.) when outputs are interpolated.
+            shell_pair = _get_mapping_pair(step_node, 'shell')
+            effective_shell = (
+                shell_pair[1].value
+                if shell_pair and isinstance(shell_pair[1], yaml.ScalarNode)
+                else job_default_shell
+            )
+            all_output_matches = sorted(set(POST_TRANSFORM_RESIDUAL_RE.findall(run_v.value)))
+            if all_output_matches and not _is_posix_shell(effective_shell):
+                warnings.append(
+                    {
+                        'kind': 'unsupported_non_posix_shell',
+                        'workflow': workflow_name,
+                        'job': job_id,
+                        'step': step_label,
+                        'shell': effective_shell,
+                        'expressions': all_output_matches,
+                    }
+                )
+                continue
+
+            # Fail-closed on heredoc bodies containing ${{ (steps|needs).*.outputs.* }}.
+            heredoc_exprs = _find_heredoc_output_interpolations(run_v.value)
+            if heredoc_exprs:
+                warnings.append(
+                    {
+                        'kind': 'unsupported_heredoc_interpolation',
+                        'workflow': workflow_name,
+                        'job': job_id,
+                        'step': step_label,
+                        'expressions': heredoc_exprs,
+                    }
+                )
                 continue
 
             # C3: Fail-closed on compound expressions inside run:
